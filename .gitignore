@@ -1,0 +1,10 @@
+*.vbproj.user
+bin/
+obj/
+Debug/
+Release/
+.vs/
+*.suo
+*.user
+Thumbs.db
+Desktop.ini
