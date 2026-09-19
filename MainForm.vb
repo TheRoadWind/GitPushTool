@@ -1,51 +1,48 @@
 ﻿Imports System.Diagnostics
 Imports System.Drawing
 Imports System.IO
+Imports System.Net.Http
+Imports System.Net.Http.Headers
 Imports System.Text
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
-Imports System.Net.Http
-Imports System.Net.Http.Headers
 
 Public Class MainForm
 
-    ' ========== 控件字段 ==========
+    ' ==================== 主界面控件 ====================
     Private lblProject As Label
     Private txtProject As TextBox
     Private btnBrowse As Button
     Private lblRepo As Label
     Private txtRepo As TextBox
-    Private lblUser As Label
-    Private txtUser As TextBox
     Private lblEmail As Label
     Private txtEmail As TextBox
     Private lblToken As Label
     Private txtToken As TextBox
     Private lblMsg As Label
     Private txtMsg As TextBox
-    Private lblGit As Label
-    Private txtGit As TextBox
     Private chkInit As CheckBox
     Private chkIgnore As CheckBox
     Private chkReadme As CheckBox
+    Private chkCreateRepo As CheckBox
     Private btnPush As Button
     Private btnManage As Button
+    Private btnSettings As Button
     Private txtLog As TextBox
-    Private chkCreateRepo As CheckBox
 
-    ' 状态
-    Private detectedGit As String = ""
-    Private gitHubUser As String = "TheRoadWind"
-    Private repoBase As String = "https://github.com/TheRoadWind"
+    ' ==================== 状态（不在界面显示） ====================
+    Private currentUser As String = ""
+    Private currentGit As String = ""
 
-    ' 配置文件路径：%APPDATA%\GitPushTool\config.ini
-    Private ReadOnly configDir As String = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitPushTool")
-    Private ReadOnly configFile As String = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitPushTool", "config.ini")
+    Private ReadOnly configDir As String =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitPushTool")
+    Private ReadOnly configFile As String =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitPushTool", "config.ini")
 
-    ' ========== 构造函数：动态生成全部控件 ==========
+    ' ==================== 构造函数 ====================
     Public Sub New()
         Me.Text = "Git 一键推送工具"
-        Me.ClientSize = New Size(600, 590)
+        Me.ClientSize = New Size(600, 560)
         Me.AllowDrop = True
         Me.StartPosition = FormStartPosition.CenterScreen
 
@@ -78,7 +75,7 @@ Public Class MainForm
                            Return c
                        End Function
 
-        ' ---- 创建控件 ----
+        ' ---- 控件创建 ----
         lblProject = NewLabel(Me, "lblProject", "项目路径：", 12, 15)
         txtProject = NewTextBox(Me, "txtProject", "", 90, 12, 380)
         btnBrowse = NewButton(Me, "btnBrowse", "浏览...", 480, 11, 75, 25)
@@ -86,11 +83,8 @@ Public Class MainForm
         lblRepo = NewLabel(Me, "lblRepo", "仓库地址：", 12, 50)
         txtRepo = NewTextBox(Me, "txtRepo", "", 90, 47, 465)
 
-        lblUser = NewLabel(Me, "lblUser", "用户名：", 12, 85)
-        txtUser = NewTextBox(Me, "txtUser", gitHubUser, 90, 82, 180)
-
-        lblEmail = NewLabel(Me, "lblEmail", "邮箱：", 290, 85)
-        txtEmail = NewTextBox(Me, "txtEmail", "", 340, 82, 215)
+        lblEmail = NewLabel(Me, "lblEmail", "邮箱：", 12, 85)
+        txtEmail = NewTextBox(Me, "txtEmail", "", 90, 82, 465)
 
         lblToken = NewLabel(Me, "lblToken", "PAT令牌：", 12, 120)
         txtToken = NewTextBox(Me, "txtToken", "", 90, 117, 465)
@@ -99,21 +93,18 @@ Public Class MainForm
         lblMsg = NewLabel(Me, "lblMsg", "提交信息：", 12, 155)
         txtMsg = NewTextBox(Me, "txtMsg", "Initial commit", 90, 152, 465)
 
-        lblGit = NewLabel(Me, "lblGit", "Git 路径：", 12, 190)
-        txtGit = NewTextBox(Me, "txtGit", "", 90, 187, 465)
-        txtGit.ReadOnly = True
-        txtGit.BackColor = Color.WhiteSmoke
+        chkInit = NewCheck(Me, "chkInit", "自动 git init", 90, 190, True)
+        chkIgnore = NewCheck(Me, "chkIgnore", "生成 .gitignore", 210, 190, True)
+        chkReadme = NewCheck(Me, "chkReadme", "生成 README.md", 330, 190, True)
+        chkCreateRepo = NewCheck(Me, "chkCreateRepo", "自动建远程仓库", 460, 190, True)
 
-        chkInit = NewCheck(Me, "chkInit", "需要时自动 git init", 90, 220, True)
-        chkIgnore = NewCheck(Me, "chkIgnore", "自动生成 .gitignore", 230, 220, True)
-        chkReadme = NewCheck(Me, "chkReadme", "自动生成 README.md", 380, 220, True)
-        chkCreateRepo = NewCheck(Me, "chkCreateRepo", "自动创建远程仓库", 90, 245, True)
+        btnSettings = NewButton(Me, "btnSettings", "设置", 90, 220, 90, 30)
+        btnManage = NewButton(Me, "btnManage", "管理仓库", 190, 220, 120, 30)
+        btnPush = NewButton(Me, "btnPush", "创建并推送", 410, 220, 155, 30)
 
-        btnPush = NewButton(Me, "btnPush", "创建并推送", 400, 245, 155, 30)
-        btnManage = NewButton(Me, "btnManage", "管理仓库", 250, 250, 140, 30)
         txtLog = New TextBox() With {
-            .Location = New Point(12, 285),
-            .Size = New Size(543, 230),
+            .Location = New Point(12, 260),
+            .Size = New Size(543, 260),
             .Multiline = True,
             .ScrollBars = ScrollBars.Vertical,
             .Font = New Font("Consolas", 9.0F),
@@ -127,18 +118,22 @@ Public Class MainForm
         ' ---- 事件 ----
         AddHandler btnBrowse.Click, AddressOf btnBrowse_Click
         AddHandler btnPush.Click, AddressOf btnPush_Click
+        AddHandler btnManage.Click, AddressOf btnManage_Click
+        AddHandler btnSettings.Click, AddressOf btnSettings_Click
         AddHandler txtProject.TextChanged, AddressOf txtProject_TextChanged
         AddHandler Me.DragEnter, AddressOf MainForm_DragEnter
         AddHandler Me.DragDrop, AddressOf MainForm_DragDrop
         AddHandler Me.FormClosing, AddressOf MainForm_FormClosing
-        AddHandler btnManage.Click, AddressOf btnManage_Click
-        ' 初始化：读配置 + 找 git
+
+        ' ---- 初始化 ----
         LoadConfig()
-        detectedGit = DetectGit("")
-        txtGit.Text = If(detectedGit <> "", detectedGit, "(未找到 git.exe)")
+        If currentUser = "" Then currentUser = "TheRoadWind"
+        If currentGit = "" OrElse Not File.Exists(currentGit) Then
+            currentGit = DetectGit("")
+        End If
     End Sub
 
-    ' ========== 拖拽 ==========
+    ' ==================== 拖拽 ====================
     Private Sub MainForm_DragEnter(sender As Object, e As DragEventArgs)
         If e.Data.GetDataPresent(DataFormats.FileDrop) Then
             Dim paths = CType(e.Data.GetData(DataFormats.FileDrop), String())
@@ -157,20 +152,19 @@ Public Class MainForm
         txtProject.Text = paths(0)
     End Sub
 
-    ' 项目路径变化 -> 自动拼仓库地址
     Private Sub txtProject_TextChanged(sender As Object, e As EventArgs)
         Dim dir = txtProject.Text.Trim()
         If dir = "" Then Return
         Try
             Dim name = New DirectoryInfo(dir).Name
             If name <> "" Then
-                txtRepo.Text = $"{repoBase}/{name}.git"
+                txtRepo.Text = $"https://github.com/{currentUser}/{name}.git"
             End If
         Catch
         End Try
     End Sub
 
-    ' ========== 浏览 ==========
+    ' ==================== 浏览 ====================
     Private Sub btnBrowse_Click(sender As Object, e As EventArgs)
         Using fbd As New FolderBrowserDialog()
             fbd.Description = "选择项目目录"
@@ -180,15 +174,37 @@ Public Class MainForm
         End Using
     End Sub
 
-    ' ========== 自动探测 git.exe（不依赖项目路径） ==========
+    ' ==================== 设置 ====================
+    Private Sub btnSettings_Click(sender As Object, e As EventArgs)
+        Dim newUser = InputBox("GitHub 用户名：", "设置", currentUser)
+        If newUser = "" Then Return
+        Dim newGit = InputBox("git.exe 路径（留空 = 自动探测）：", "设置", currentGit)
+
+        currentUser = newUser.Trim()
+        If currentUser = "" Then currentUser = "TheRoadWind"
+
+        Dim g = newGit.Trim()
+        If g <> "" AndAlso Not File.Exists(g) Then
+            MessageBox.Show("指定的 git 不存在，将自动探测。", "提示")
+            g = DetectGit("")
+        End If
+        If g = "" Then g = DetectGit("")
+        currentGit = g
+
+        SaveConfig()
+        MessageBox.Show("设置已保存。" & vbCrLf & vbCrLf &
+                        "当前用户：" & currentUser & vbCrLf &
+                        "git.exe：" & If(currentGit = "", "(未找到)", currentGit),
+                        "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
+    End Sub
+
+    ' ==================== git 自动探测 ====================
     Private Function DetectGit(projectDir As String) As String
-        ' 1) 项目目录及其向上的 PortableGit
         If projectDir <> "" AndAlso Directory.Exists(projectDir) Then
             Dim candidates As New List(Of String)
             candidates.Add(Path.Combine(projectDir, "git.exe"))
             candidates.Add(Path.Combine(projectDir, "PortableGit", "bin", "git.exe"))
             candidates.Add(Path.Combine(projectDir, "PortableGit", "cmd", "git.exe"))
-
             Dim dir As New DirectoryInfo(projectDir)
             For i = 0 To 3
                 If dir Is Nothing Then Exit For
@@ -201,7 +217,6 @@ Public Class MainForm
             Next
         End If
 
-        ' 2) 系统常见安装位置
         Dim sysPaths = {
             "C:\Program Files\Git\bin\git.exe",
             "C:\Program Files\Git\cmd\git.exe",
@@ -212,7 +227,6 @@ Public Class MainForm
             If File.Exists(p) Then Return p
         Next
 
-        ' 3) PATH 中查找
         Try
             Dim psi As New ProcessStartInfo("where", "git") With {.RedirectStandardOutput = True, .UseShellExecute = False, .CreateNoWindow = True}
             Using p As Process = Process.Start(psi)
@@ -225,11 +239,10 @@ Public Class MainForm
             End Using
         Catch
         End Try
-
         Return ""
     End Function
 
-    ' ========== 配置读写 ==========
+    ' ==================== 配置读写 ====================
     Private Sub LoadConfig()
         Try
             If Not File.Exists(configFile) Then Return
@@ -240,10 +253,10 @@ Public Class MainForm
                 Dim k = line.Substring(0, idx).Trim()
                 Dim v = line.Substring(idx + 1).Trim()
                 Select Case k
-                    Case "user" : txtUser.Text = v
+                    Case "user" : currentUser = If(v = "", "TheRoadWind", v)
                     Case "email" : txtEmail.Text = v
                     Case "token" : txtToken.Text = v
-                    Case "git" : If File.Exists(v) Then detectedGit = v : txtGit.Text = v
+                    Case "git" : If File.Exists(v) Then currentGit = v
                 End Select
             Next
         Catch ex As Exception
@@ -256,10 +269,15 @@ Public Class MainForm
             If Not Directory.Exists(configDir) Then Directory.CreateDirectory(configDir) '| Out-Null
             Dim sb As New StringBuilder()
             sb.AppendLine("# GitPushTool 配置（自动生成，可手动编辑）")
-            sb.AppendLine("user=" & txtUser.Text.Trim())
+            sb.AppendLine("# user  : GitHub 用户名")
+            sb.AppendLine("# email : git 提交邮箱")
+            sb.AppendLine("# token : GitHub PAT")
+            sb.AppendLine("# git   : git.exe 完整路径（留空则自动探测）")
+            sb.AppendLine()
+            sb.AppendLine("user=" & currentUser)
             sb.AppendLine("email=" & txtEmail.Text.Trim())
             sb.AppendLine("token=" & txtToken.Text.Trim())
-            If detectedGit <> "" Then sb.AppendLine("git=" & detectedGit)
+            sb.AppendLine("git=" & currentGit)
             File.WriteAllText(configFile, sb.ToString(), New UTF8Encoding(False))
         Catch ex As Exception
             Log("保存配置失败：" & ex.Message)
@@ -270,15 +288,15 @@ Public Class MainForm
         SaveConfig()
     End Sub
 
-    ' ========== 主流程 ==========
+    ' ==================== 推送主流程 ====================
     Private Async Sub btnPush_Click(sender As Object, e As EventArgs)
         Dim projectPath = txtProject.Text.Trim()
         Dim repoUrl = txtRepo.Text.Trim()
-        Dim userName = txtUser.Text.Trim()
+        Dim userName = currentUser
         Dim userEmail = txtEmail.Text.Trim()
         Dim token = txtToken.Text.Trim()
         Dim commitMsg = txtMsg.Text.Trim()
-        Dim gitExe = If(detectedGit <> "", detectedGit, "git")
+        Dim gitExe = If(currentGit <> "" AndAlso File.Exists(currentGit), currentGit, "git")
 
         If projectPath = "" OrElse Not Directory.Exists(projectPath) Then
             MessageBox.Show("项目路径无效！", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
@@ -290,9 +308,7 @@ Public Class MainForm
         End If
         If commitMsg = "" Then commitMsg = "Initial commit"
 
-        ' 保存一次配置
         SaveConfig()
-
         btnPush.Enabled = False
         txtLog.Clear()
         Log("==> 使用 git：" & gitExe)
@@ -300,7 +316,8 @@ Public Class MainForm
         Try
             Await RunGitAsync(gitExe, projectPath, "--version")
 
-            If chkInit.Checked AndAlso Not Directory.Exists(Path.Combine(projectPath, ".git")) Then
+            Dim firstPush As Boolean = Not Directory.Exists(Path.Combine(projectPath, ".git"))
+            If chkInit.Checked AndAlso firstPush Then
                 Log("==> git init")
                 Await RunGitAsync(gitExe, projectPath, "init")
             Else
@@ -330,7 +347,7 @@ Public Class MainForm
                     Log("==> README.md 已存在，跳过")
                 End If
             End If
-            ' === 自动创建远程仓库 ===
+
             If chkCreateRepo.Checked Then
                 If token = "" Then
                     Log("==> [跳过建仓库] 未填写 PAT")
@@ -339,8 +356,8 @@ Public Class MainForm
                     If repoName = "" Then
                         Log("==> [跳过建仓库] 无法解析仓库名")
                     Else
-                        Log($"==> 检查/创建远程仓库：{gitHubUser}/{repoName}")
-                        Dim r = Await EnsureGitHubRepoAsync(gitHubUser, repoName, token)
+                        Log($"==> 检查/创建远程仓库：{currentUser}/{repoName}")
+                        Dim r = Await EnsureGitHubRepoAsync(currentUser, repoName, token)
                         Select Case r
                             Case RepoResult.Created : Log("    已创建")
                             Case RepoResult.Exists : Log("    已存在，跳过")
@@ -349,7 +366,7 @@ Public Class MainForm
                     End If
                 End If
             End If
-            ' 远程：带 token 的 URL（如果填了 token）
+
             Dim pushUrl = repoUrl
             If token <> "" Then
                 pushUrl = InjectToken(repoUrl, userName, token)
@@ -357,22 +374,21 @@ Public Class MainForm
             End If
 
             Log("==> 配置远程 origin")
-            Await RunGitAsync(gitExe, projectPath, "remote remove origin", ignoreError:=True)
+            Dim hasOrigin = Await HasRemoteAsync(gitExe, projectPath, "origin")
+            If hasOrigin Then
+                Await RunGitAsync(gitExe, projectPath, "remote remove origin", ignoreError:=True)
+            End If
             Await RunGitAsync(gitExe, projectPath, $"remote add origin ""{pushUrl}""")
 
             Log("==> git add .")
             Await RunGitAsync(gitExe, projectPath, "add .")
 
-            Log("==> git commit")
             Dim finalMsg = If(commitMsg = "", "Initial commit", commitMsg)
-            ' 如果项目已存在 .git（说明不是首次），自动追加时间戳
-            If Directory.Exists(Path.Combine(projectPath, ".git")) AndAlso File.Exists(Path.Combine(projectPath, ".git", "HEAD")) Then
-                ' 判断是否已有提交：用 git log 判断（略），简单做法是直接加时间
-                ' 这里保持原样，只把用户没改过的 "Initial commit" 变一下
-                If finalMsg = "Initial commit" Then
-                    finalMsg = "Update " & DateTime.Now.ToString("yyyy-MM-dd HH:mm")
-                End If
+            If Not firstPush AndAlso finalMsg = "Initial commit" Then
+                finalMsg = "Update " & DateTime.Now.ToString("yyyy-MM-dd HH:mm")
             End If
+
+            Log("==> git commit")
             Await RunGitAsync(gitExe, projectPath, $"commit -m ""{finalMsg}""", ignoreError:=True)
 
             Log("==> git branch -M main")
@@ -381,7 +397,6 @@ Public Class MainForm
             Log("==> git push -u origin main")
             Await RunGitAsync(gitExe, projectPath, "push -u origin main")
 
-            ' 推送完把远程地址恢复成干净版，避免 token 留在 .git/config
             If token <> "" Then
                 Await RunGitAsync(gitExe, projectPath, $"remote set-url origin ""{repoUrl}""")
             End If
@@ -395,50 +410,68 @@ Public Class MainForm
             btnPush.Enabled = True
         End Try
     End Sub
-    ' ========== 从 URL 解析仓库名 ==========
+
+    ' ==================== 辅助函数 ====================
+    Private Async Function HasRemoteAsync(gitExe As String, workDir As String, remoteName As String) As Task(Of Boolean)
+        Dim result As Boolean = False
+        Await Task.Run(Sub()
+                           Try
+                               Dim psi As New ProcessStartInfo() With {
+                                   .FileName = gitExe,
+                                   .Arguments = "remote",
+                                   .WorkingDirectory = workDir,
+                                   .RedirectStandardOutput = True,
+                                   .UseShellExecute = False,
+                                   .CreateNoWindow = True
+                               }
+                               Using p As Process = Process.Start(psi)
+                                   Dim output = p.StandardOutput.ReadToEnd()
+                                   p.WaitForExit()
+                                   result = output.Split({ControlChars.Cr, ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries).
+                                                   Any(Function(s) s.Trim() = remoteName)
+                               End Using
+                           Catch
+                           End Try
+                       End Sub)
+        Return result
+    End Function
+
+    Private Function InjectToken(repoUrl As String, user As String, token As String) As String
+        If Not repoUrl.StartsWith("https://") Then Return repoUrl
+        Dim rest = repoUrl.Substring("https://".Length)
+        Return $"https://{user}:{token}@{rest}"
+    End Function
+
     Private Function GetRepoNameFromUrl(url As String) As String
         Try
-            ' https://github.com/TheRoadWind/xxx.git
             Dim u = url.TrimEnd("/"c)
             If u.EndsWith(".git", StringComparison.OrdinalIgnoreCase) Then
                 u = u.Substring(0, u.Length - 4)
             End If
             Dim parts = u.Split("/"c)
-            If parts.Length >= 2 Then
-                Return parts(parts.Length - 1)
-            End If
+            If parts.Length >= 2 Then Return parts(parts.Length - 1)
         Catch
         End Try
         Return ""
     End Function
 
-    ' ========== 仓库创建结果 ==========
     Private Enum RepoResult
         Created
         Exists
         Failed
     End Enum
 
-    ' ========== 调 GitHub API 创建仓库 ==========
-    Private Async Function EnsureGitHubRepoAsync(owner As String, repoName As String, token As String,
-                                              Optional userName As String = "",
-                                              Optional userEmail As String = "") As Task(Of RepoResult)
+    Private Async Function EnsureGitHubRepoAsync(owner As String, repoName As String, token As String) As Task(Of RepoResult)
         Try
             Using client As New HttpClient()
                 client.Timeout = TimeSpan.FromSeconds(20)
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("GitPushTool/1.0")
-                client.DefaultRequestHeaders.Authorization =
-                New AuthenticationHeaderValue("token", token)
-                client.DefaultRequestHeaders.Accept.Add(
-                New MediaTypeWithQualityHeaderValue("application/vnd.github+json"))
+                client.DefaultRequestHeaders.Authorization = New AuthenticationHeaderValue("token", token)
+                client.DefaultRequestHeaders.Accept.Add(New MediaTypeWithQualityHeaderValue("application/vnd.github+json"))
 
-                ' 先查仓库是否已存在
                 Dim checkResp = Await client.GetAsync($"https://api.github.com/repos/{owner}/{repoName}")
-                If checkResp.IsSuccessStatusCode Then
-                    Return RepoResult.Exists
-                End If
+                If checkResp.IsSuccessStatusCode Then Return RepoResult.Exists
 
-                ' 组装 JSON（不引 Newtonsoft，手写就行）
                 Dim json As New StringBuilder()
                 json.Append("{")
                 json.Append("""name"":""" & EscapeJson(repoName) & """,")
@@ -455,8 +488,10 @@ Public Class MainForm
                 If resp.IsSuccessStatusCode Then
                     Return RepoResult.Created
                 ElseIf CInt(resp.StatusCode) = 422 Then
-                    ' 422 = 已存在或名字非法
                     Return RepoResult.Exists
+                ElseIf CInt(resp.StatusCode) = 403 Then
+                    Log("    [权限不足] PAT 需要勾选 repo（Classic）或 Administration:write（Fine-grained）")
+                    Return RepoResult.Failed
                 Else
                     Dim body = Await resp.Content.ReadAsStringAsync()
                     Log("    API 返回：" & CInt(resp.StatusCode).ToString() & " " & body)
@@ -469,19 +504,12 @@ Public Class MainForm
         End Try
     End Function
 
-    ' ========== JSON 字符串转义 ==========
     Private Function EscapeJson(s As String) As String
         If s Is Nothing Then Return ""
-        Return s.Replace("\", "\\").Replace("""", "\""").Replace(vbCr, "\r").Replace(vbLf, "\n").Replace(vbTab, "\t")
-    End Function
-    ' 把 https://github.com/user/repo.git 变成 https://user:token@github.com/user/repo.git
-    Private Function InjectToken(repoUrl As String, user As String, token As String) As String
-        If Not repoUrl.StartsWith("https://") Then Return repoUrl
-        Dim rest = repoUrl.Substring("https://".Length)
-        Return $"https://{user}:{token}@{rest}"
+        Return s.Replace("\", "\\").Replace("""", "\").Replace(vbCr, "\r").Replace(vbLf, "\n").Replace(vbTab, "\t")
     End Function
 
-    ' ========== 执行 git ==========
+    ' ==================== 执行 git ====================
     Private Function RunGitAsync(gitExe As String, workDir As String, args As String, Optional ignoreError As Boolean = False) As Task
         Return Task.Run(Sub()
                             Dim psi As New ProcessStartInfo() With {
@@ -508,7 +536,7 @@ Public Class MainForm
                         End Sub)
     End Function
 
-    ' ========== 日志 ==========
+    ' ==================== 日志 ====================
     Private Sub Log(text As String)
         If txtLog.InvokeRequired Then
             txtLog.Invoke(Sub() Log(text))
@@ -517,9 +545,13 @@ Public Class MainForm
         txtLog.AppendText(text & Environment.NewLine)
     End Sub
 
-    ' ========== 模板 ==========
+    ' ==================== 模板 ====================
     Private Function DefaultGitIgnore() As String
-        Return "*.vbproj.user" & vbCrLf &
+        Return "# ==== 通用 ====" & vbCrLf &
+               "Thumbs.db" & vbCrLf &
+               "Desktop.ini" & vbCrLf &
+               ".DS_Store" & vbCrLf & vbCrLf &
+               "# ==== .NET / VB.NET ====" & vbCrLf &
                "bin/" & vbCrLf &
                "obj/" & vbCrLf &
                "Debug/" & vbCrLf &
@@ -527,15 +559,30 @@ Public Class MainForm
                ".vs/" & vbCrLf &
                "*.suo" & vbCrLf &
                "*.user" & vbCrLf &
-               "Thumbs.db" & vbCrLf &
-               "Desktop.ini" & vbCrLf
+               "*.vbproj.user" & vbCrLf & vbCrLf &
+               "# ==== Python ====" & vbCrLf &
+               "__pycache__/" & vbCrLf &
+               "*.py[cod]" & vbCrLf &
+               "*.egg-info/" & vbCrLf &
+               ".venv/" & vbCrLf &
+               "venv/" & vbCrLf &
+               ".pytest_cache/" & vbCrLf & vbCrLf &
+               "# ==== 构建产物 ====" & vbCrLf &
+               "*.exe" & vbCrLf &
+               "*.dll" & vbCrLf &
+               "*.pdb" & vbCrLf &
+               "*.zip" & vbCrLf &
+               "*.7z" & vbCrLf & vbCrLf &
+               "# ==== 编辑器 ====" & vbCrLf &
+               ".idea/" & vbCrLf &
+               ".vscode/" & vbCrLf
     End Function
 
     Private Function DefaultReadme(projName As String) As String
         Dim sb As New StringBuilder()
         sb.AppendLine("# " & projName)
         sb.AppendLine()
-        sb.AppendLine("> 由 [GitPushTool](https://github.com/TheRoadWind) 自动生成")
+        sb.AppendLine("> 由 GitPushTool 自动生成")
         sb.AppendLine()
         sb.AppendLine("---")
         sb.AppendLine()
@@ -553,51 +600,24 @@ Public Class MainForm
         sb.AppendLine()
         sb.AppendLine("- 操作系统：Windows 10 / 11")
         sb.AppendLine("- 运行时：.NET Framework 4.8 / .NET 6+ / Python 3.x（按需修改）")
-        sb.AppendLine("- 其他依赖：见 `requirements.txt` 或 `packages.config`")
         sb.AppendLine()
         sb.AppendLine("## 🚀 快速开始")
         sb.AppendLine()
-        sb.AppendLine("### 1. 克隆仓库")
-        sb.AppendLine()
         sb.AppendLine("```bash")
-        sb.AppendLine("git clone https://github.com/TheRoadWind/" & projName & ".git")
+        sb.AppendLine("git clone https://github.com/" & currentUser & "/" & projName & ".git")
         sb.AppendLine("cd " & projName)
-        sb.AppendLine("```")
-        sb.AppendLine()
-        sb.AppendLine("### 2. 安装依赖")
-        sb.AppendLine()
-        sb.AppendLine("```bash")
-        sb.AppendLine("# Python 示例")
-        sb.AppendLine("pip install -r requirements.txt")
-        sb.AppendLine()
-        sb.AppendLine("# .NET 示例")
-        sb.AppendLine("nuget restore " & projName & ".sln")
-        sb.AppendLine("```")
-        sb.AppendLine()
-        sb.AppendLine("### 3. 运行")
-        sb.AppendLine()
-        sb.AppendLine("```bash")
-        sb.AppendLine("# Python 示例")
-        sb.AppendLine("python main.py")
-        sb.AppendLine()
-        sb.AppendLine("# .NET 示例")
-        sb.AppendLine("dotnet run  # 或直接双击 " & projName & ".sln 用 VS 打开")
         sb.AppendLine("```")
         sb.AppendLine()
         sb.AppendLine("## 📁 目录结构")
         sb.AppendLine()
         sb.AppendLine("```")
         sb.AppendLine(projName & "/")
-        sb.AppendLine("├── .vb/                # 源代码")
-        sb.AppendLine("├── .sln/               # 解决方案")
-        sb.AppendLine("├── .vbproj,.csproj/              # 项目")
+        sb.AppendLine("├── src/")
+        sb.AppendLine("├── docs/")
+        sb.AppendLine("├── tests/")
         sb.AppendLine("├── .gitignore")
         sb.AppendLine("└── README.md")
         sb.AppendLine("```")
-        sb.AppendLine()
-        sb.AppendLine("## 📸 截图")
-        sb.AppendLine()
-        sb.AppendLine("（在此粘贴运行截图或演示 GIF）")
         sb.AppendLine()
         sb.AppendLine("## 📝 更新日志")
         sb.AppendLine()
@@ -605,19 +625,9 @@ Public Class MainForm
         sb.AppendLine()
         sb.AppendLine("- 初始版本")
         sb.AppendLine()
-        sb.AppendLine("## 🤝 贡献")
-        sb.AppendLine()
-        sb.AppendLine("欢迎提交 Issue 和 Pull Request。")
-        sb.AppendLine()
-        sb.AppendLine("1. Fork 本仓库")
-        sb.AppendLine("2. 新建分支 `git checkout -b feature/xxx`")
-        sb.AppendLine("3. 提交改动 `git commit -m 'feat: xxx'`")
-        sb.AppendLine("4. 推送分支 `git push origin feature/xxx`")
-        sb.AppendLine("5. 提交 Pull Request")
-        sb.AppendLine()
         sb.AppendLine("## 📄 License")
         sb.AppendLine()
-        sb.AppendLine("本项目基于 [MIT](LICENSE) 协议开源。")
+        sb.AppendLine("本项目基于 MIT 协议开源。")
         sb.AppendLine()
         sb.AppendLine("---")
         sb.AppendLine()
@@ -626,20 +636,15 @@ Public Class MainForm
     End Function
 
     ' ====================================================================
-    ' ==================== 仓库管理弹窗（内嵌，不新建文件） ================
+    ' ==================== 仓库管理弹窗（内嵌） =========================
     ' ====================================================================
     Private Sub btnManage_Click(sender As Object, e As EventArgs)
         Dim token = txtToken.Text.Trim()
-        Dim userName = txtUser.Text.Trim()
         If token = "" Then
             MessageBox.Show("请先填写 PAT 令牌！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
             Return
         End If
-        If userName = "" Then
-            MessageBox.Show("请先填写用户名！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
-            Return
-        End If
-        ShowRepoManagerDialog(token, userName)
+        ShowRepoManagerDialog(token, currentUser)
     End Sub
 
     Private Sub ShowRepoManagerDialog(token As String, owner As String)
@@ -652,30 +657,18 @@ Public Class MainForm
             .MaximizeBox = False
         }
 
-        ' ---- 顶部 ----
         Dim lblSearch As New Label() With {.Text = "搜索：", .Location = New Point(12, 15), .AutoSize = True}
         dlg.Controls.Add(lblSearch)
 
         Dim txtSearch As New TextBox() With {.Location = New Point(60, 12), .Size = New Size(360, 23)}
         dlg.Controls.Add(txtSearch)
 
-        Dim btnRefresh As New Button() With {
-            .Text = "刷新",
-            .Location = New Point(430, 11),
-            .Size = New Size(80, 25),
-            .UseVisualStyleBackColor = True
-        }
+        Dim btnRefresh As New Button() With {.Text = "刷新", .Location = New Point(430, 11), .Size = New Size(80, 25), .UseVisualStyleBackColor = True}
         dlg.Controls.Add(btnRefresh)
 
-        Dim lblStatus As New Label() With {
-            .Text = "加载中...",
-            .Location = New Point(520, 15),
-            .AutoSize = True,
-            .ForeColor = Color.Gray
-        }
+        Dim lblStatus As New Label() With {.Text = "加载中...", .Location = New Point(520, 15), .AutoSize = True, .ForeColor = Color.Gray}
         dlg.Controls.Add(lblStatus)
 
-        ' ---- 列表 ----
         Dim lstRepos As New CheckedListBox() With {
             .Location = New Point(12, 45),
             .Size = New Size(616, 350),
@@ -685,23 +678,10 @@ Public Class MainForm
         }
         dlg.Controls.Add(lstRepos)
 
-        ' ---- 底部按钮 ----
-        Dim btnSelectAll As New Button() With {
-            .Text = "全选",
-            .Location = New Point(12, 408),
-            .Size = New Size(80, 30),
-            .UseVisualStyleBackColor = True,
-            .Anchor = AnchorStyles.Bottom Or AnchorStyles.Left
-        }
+        Dim btnSelectAll As New Button() With {.Text = "全选", .Location = New Point(12, 408), .Size = New Size(80, 30), .UseVisualStyleBackColor = True, .Anchor = AnchorStyles.Bottom Or AnchorStyles.Left}
         dlg.Controls.Add(btnSelectAll)
 
-        Dim btnInvert As New Button() With {
-            .Text = "反选",
-            .Location = New Point(100, 408),
-            .Size = New Size(80, 30),
-            .UseVisualStyleBackColor = True,
-            .Anchor = AnchorStyles.Bottom Or AnchorStyles.Left
-        }
+        Dim btnInvert As New Button() With {.Text = "反选", .Location = New Point(100, 408), .Size = New Size(80, 30), .UseVisualStyleBackColor = True, .Anchor = AnchorStyles.Bottom Or AnchorStyles.Left}
         dlg.Controls.Add(btnInvert)
 
         Dim btnDelete As New Button() With {
@@ -716,19 +696,12 @@ Public Class MainForm
         btnDelete.FlatAppearance.BorderSize = 0
         dlg.Controls.Add(btnDelete)
 
-        Dim btnClose As New Button() With {
-            .Text = "关闭",
-            .Location = New Point(540, 408),
-            .Size = New Size(88, 30),
-            .UseVisualStyleBackColor = True,
-            .Anchor = AnchorStyles.Bottom Or AnchorStyles.Right
-        }
+        Dim btnClose As New Button() With {.Text = "关闭", .Location = New Point(540, 408), .Size = New Size(88, 30), .UseVisualStyleBackColor = True, .Anchor = AnchorStyles.Bottom Or AnchorStyles.Right}
         dlg.Controls.Add(btnClose)
 
-        ' ---- 数据 ----
         Dim allRepos As New List(Of RepoInfo)()
 
-        ' ---- 内部：过滤 ----
+        ' ---------- 内部委托：过滤 ----------
         Dim ApplyFilter As Action =
             Sub()
                 Dim kw = txtSearch.Text.Trim().ToLowerInvariant()
@@ -740,7 +713,7 @@ Public Class MainForm
                 Next
             End Sub
 
-        ' ---- 内部：加载 ----
+        ' ---------- 内部委托：加载 ----------
         Dim LoadRepos As Func(Of Task) =
             Async Function() As Task
                 btnRefresh.Enabled = False
@@ -762,8 +735,7 @@ Public Class MainForm
                             Dim resp = Await client.GetAsync(url)
                             If Not resp.IsSuccessStatusCode Then
                                 Dim body = Await resp.Content.ReadAsStringAsync()
-                                MessageBox.Show(dlg, "获取仓库失败：" & CInt(resp.StatusCode) & vbCrLf & body,
-                                                "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                                MessageBox.Show(dlg, "获取仓库失败：" & CInt(resp.StatusCode) & vbCrLf & body, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
                                 Exit Do
                             End If
 
@@ -796,7 +768,7 @@ Public Class MainForm
                 End Try
             End Function
 
-        ' ---- 内部：删除 ----
+        ' ---------- 内部委托：删除 ----------
         Dim DoDelete As Func(Of Task) =
             Async Function() As Task
                 Dim selected As New List(Of RepoInfo)
@@ -810,11 +782,7 @@ Public Class MainForm
                 End If
 
                 Dim names = String.Join(vbCrLf, selected.Select(Function(r) "  • " & r.Name))
-                Dim confirm As String = InputBox(
-                    "即将删除以下 " & selected.Count & " 个仓库（不可恢复）：" & vbCrLf & vbCrLf &
-                    names & vbCrLf & vbCrLf &
-                    "请输入 DELETE 以确认：",
-                    "危险操作确认", "")
+                Dim confirm As String = InputBox("即将删除以下 " & selected.Count & " 个仓库（不可恢复）：" & vbCrLf & vbCrLf & names & vbCrLf & vbCrLf & "请输入 DELETE 以确认：", "危险操作确认", "")
                 If confirm <> "DELETE" Then
                     MessageBox.Show(dlg, "已取消删除。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information)
                     Return
@@ -840,8 +808,14 @@ Public Class MainForm
                                     okCount += 1
                                     allRepos.RemoveAll(Function(x) x.Name = r.Name)
                                 Else
-                                    Dim body = Await resp.Content.ReadAsStringAsync()
-                                    failList.Add($"{r.Name} (HTTP {CInt(resp.StatusCode)})")
+                                    Dim code = CInt(resp.StatusCode)
+                                    Dim hint = ""
+                                    If code = 403 Then
+                                        hint = " [权限不足：Classic需勾 delete_repo；Fine-grained需 Administration:write + All repositories]"
+                                    ElseIf code = 404 Then
+                                        hint = " [仓库不存在或PAT无权访问]"
+                                    End If
+                                    failList.Add($"{r.Name} (HTTP {code}){hint}")
                                 End If
                             Catch ex As Exception
                                 failList.Add($"{r.Name} ({ex.Message})")
@@ -864,7 +838,7 @@ Public Class MainForm
                 End Try
             End Function
 
-        ' ---- 事件绑定 ----
+        ' ---------- 事件绑定 ----------
         AddHandler btnRefresh.Click, Sub() LoadRepos()
         AddHandler txtSearch.TextChanged, Sub() ApplyFilter()
         AddHandler btnSelectAll.Click,
@@ -897,12 +871,14 @@ Public Class MainForm
             Return $"{Name}    [{vis}]    {UpdatedAt}"
         End Function
     End Class
+
 End Class
-' ==================== 极简 JSON 解析器 ================================
+
+' ====================================================================
+' ==================== 极简 JSON 解析器 =============================
 ' ====================================================================
 Public Module SimpleJsonParser
 
-    ''' <summary>把顶层 JSON 数组切成每个元素的原始字符串</summary>
     Public Function ParseArray(json As String) As List(Of String)
         Dim result As New List(Of String)
         If String.IsNullOrWhiteSpace(json) Then Return result
