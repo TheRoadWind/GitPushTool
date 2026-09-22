@@ -4,6 +4,7 @@ Imports System.IO
 Imports System.Net.Http
 Imports System.Net.Http.Headers
 Imports System.Text
+Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
 
@@ -13,7 +14,7 @@ Imports System.Windows.Forms
 ''' </summary>
 Public Class MainForm
 
-    ' ==================== 主界面控件（全部动态创建） ====================
+    ' ==================== 主界面控件（由 CreateControls 动态创建） ====================
     ' ---- 左：推送面板 ----
     Private pnlPush As Panel             ' 推送面板容器
     Private lblPushTitle As Label        ' 面板标题
@@ -28,6 +29,11 @@ Public Class MainForm
     Private txtToken As TextBox          ' PAT 令牌输入框
     Private lblMsg As Label              ' 提交信息标签
     Private txtMsg As TextBox            ' 提交信息输入框
+    Private lblVersion As Label          ' 版本号标签
+    Private txtVersion As TextBox        ' 版本号输入框（写入 .vbproj）
+    Private chkTag As CheckBox           ' 是否打 tag
+    Private txtTag As TextBox            ' tag 名称
+    Private btnUpgradeVersion As Button  ' 确认升级按钮
     Private chkInit As CheckBox          ' 自动 git init
     Private chkIgnore As CheckBox        ' 生成 .gitignore
     Private chkReadme As CheckBox        ' 生成 README.md
@@ -35,6 +41,7 @@ Public Class MainForm
     Private chkForce As CheckBox         ' 强制覆盖推送
     Private btnSettings As Button        ' 设置按钮
     Private btnPush As Button            ' 创建并推送按钮
+    Private lblHint As Label             ' 提示文字
 
     ' ---- 中：README 面板 ----
     Private pnlReadme As Panel           ' README 面板容器
@@ -44,6 +51,7 @@ Public Class MainForm
     ' ---- 右：仓库管理面板 ----
     Private pnlRepoMgr As Panel          ' 仓库管理面板容器
     Private lblRepoMgrTitle As Label     ' 面板标题
+    Private lblSearch As Label           ' 搜索标签
     Private txtSearch As TextBox         ' 搜索框
     Private btnRefresh As Button         ' 刷新按钮
     Private lblStatus As Label           ' 状态标签
@@ -55,34 +63,45 @@ Public Class MainForm
     ' ---- 底部：日志 ----
     Private txtLog As TextBox            ' 日志输出框
 
-    ' ==================== 状态（不在界面显示） ====================
+    ' ==================== 状态 ====================
     Private currentUser As String = ""        ' 当前 GitHub 用户名
     Private currentGit As String = ""         ' 当前 git.exe 完整路径
     Private allRepos As New List(Of RepoInfo)() ' 当前账号下所有仓库
-    Private isRepoLoaded As Boolean = False   ' 是否已成功加载过仓库列表
 
-    ' 配置文件目录：%APPDATA%\GitPushTool
+    ' 配置文件目录与路径:C:\Users\Administrator\AppData\Roaming\GitPushTool
     Private ReadOnly configDir As String =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitPushTool")
-    ' 配置文件路径：%APPDATA%\GitPushTool\config.ini
     Private ReadOnly configFile As String =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitPushTool", "config.ini")
 
     ' ==================== 构造函数 ====================
-    ''' <summary>构造函数：动态创建所有控件，绑定事件，加载配置</summary>
+    ''' <summary>构造函数：调用 InitializeComponent 后创建控件、绑定事件、加载配置</summary>
     Public Sub New()
-        InitializeComponent()
+        InitializeComponent()          ' 保留 Designer 生成的初始化
+        CreateControls()               ' 动态创建所有控件
+        LoadConfig()                   ' 加载配置
+        If currentUser = "" Then currentUser = InputBox("GitHub 用户名：", "设置", currentUser)
+        If currentGit = "" OrElse Not File.Exists(currentGit) Then
+            currentGit = DetectGit("")
+        End If
+        If String.IsNullOrWhiteSpace(txtReadme.Text) Then
+            txtReadme.Text = DefaultReadme("")
+        End If
+    End Sub
 
+    ' ==================== 动态创建所有控件 ====================
+    ''' <summary>创建所有控件并绑定事件</summary>
+    Private Sub CreateControls()
         Me.Text = "Git 一键推送工具"
-        Me.ClientSize = New Size(1180, 760)
+        Me.ClientSize = New Size(1250, 680)
         Me.AllowDrop = True
         Me.StartPosition = FormStartPosition.CenterScreen
-        Me.MinimumSize = New Size(1180, 760)
+        Me.MinimumSize = New Size(1250, 680)
 
-        ' ============ 左侧：推送面板 ============
+        ' ========== 左侧：推送面板 ==========
         pnlPush = New Panel() With {
             .Location = New Point(10, 10),
-            .Size = New Size(500, 450),
+            .Size = New Size(500, 480),
             .BorderStyle = BorderStyle.FixedSingle
         }
         Me.Controls.Add(pnlPush)
@@ -95,80 +114,89 @@ Public Class MainForm
         }
         pnlPush.Controls.Add(lblPushTitle)
 
-        ' ---- 项目路径 ----
+        ' 项目路径
         lblProject = New Label() With {.Text = "项目路径：", .Location = New Point(10, 45), .AutoSize = True}
         pnlPush.Controls.Add(lblProject)
-
         txtProject = New TextBox() With {.Location = New Point(90, 42), .Size = New Size(320, 23)}
         pnlPush.Controls.Add(txtProject)
-
         btnBrowse = New Button() With {.Text = "浏览...", .Location = New Point(415, 41), .Size = New Size(75, 25), .UseVisualStyleBackColor = True}
         pnlPush.Controls.Add(btnBrowse)
 
-        ' ---- 仓库地址 ----
+        ' 仓库地址
         lblRepo = New Label() With {.Text = "仓库地址：", .Location = New Point(10, 80), .AutoSize = True}
         pnlPush.Controls.Add(lblRepo)
-
         txtRepo = New TextBox() With {.Location = New Point(90, 77), .Size = New Size(400, 23)}
         pnlPush.Controls.Add(txtRepo)
 
-        ' ---- 邮箱 ----
+        ' 邮箱
         lblEmail = New Label() With {.Text = "邮箱：", .Location = New Point(10, 115), .AutoSize = True}
         pnlPush.Controls.Add(lblEmail)
-
         txtEmail = New TextBox() With {.Location = New Point(90, 112), .Size = New Size(400, 23)}
         pnlPush.Controls.Add(txtEmail)
 
-        ' ---- PAT 令牌 ----
+        ' PAT 令牌
         lblToken = New Label() With {.Text = "PAT令牌：", .Location = New Point(10, 150), .AutoSize = True}
         pnlPush.Controls.Add(lblToken)
-
         txtToken = New TextBox() With {.Location = New Point(90, 147), .Size = New Size(400, 23), .UseSystemPasswordChar = True}
         pnlPush.Controls.Add(txtToken)
 
-        ' ---- 提交信息 ----
+        ' 提交信息
         lblMsg = New Label() With {.Text = "提交信息：", .Location = New Point(10, 185), .AutoSize = True}
         pnlPush.Controls.Add(lblMsg)
-
         txtMsg = New TextBox() With {.Text = "初始化提交", .Location = New Point(90, 182), .Size = New Size(400, 23)}
         pnlPush.Controls.Add(txtMsg)
 
-        ' ---- 选项 ----
-        chkInit = New CheckBox() With {.Text = "自动 git init", .Location = New Point(90, 220), .AutoSize = True, .Checked = True}
+        ' 版本号 + tag + 确认升级
+        lblVersion = New Label() With {.Text = "版本号：", .Location = New Point(10, 220), .AutoSize = True}
+        pnlPush.Controls.Add(lblVersion)
+        txtVersion = New TextBox() With {.Text = "1.0.0.0", .Location = New Point(90, 217), .Size = New Size(130, 23)}
+        pnlPush.Controls.Add(txtVersion)
+        chkTag = New CheckBox() With {.Text = "同步打 tag", .Location = New Point(230, 220), .AutoSize = True, .Checked = False}
+        pnlPush.Controls.Add(chkTag)
+        txtTag = New TextBox() With {.Text = "v1.0.0", .Location = New Point(330, 217), .Size = New Size(160, 23)}
+        pnlPush.Controls.Add(txtTag)
+
+        btnUpgradeVersion = New Button() With {
+            .Text = "确认升级",
+            .Location = New Point(330, 247),
+            .Size = New Size(160, 28),
+            .BackColor = Color.LightSteelBlue,
+            .FlatStyle = FlatStyle.Flat
+        }
+        btnUpgradeVersion.FlatAppearance.BorderSize = 0
+        pnlPush.Controls.Add(btnUpgradeVersion)
+
+        ' 选项
+        chkInit = New CheckBox() With {.Text = "自动 git init", .Location = New Point(90, 285), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkInit)
-
-        chkIgnore = New CheckBox() With {.Text = "生成 .gitignore", .Location = New Point(210, 220), .AutoSize = True, .Checked = True}
+        chkIgnore = New CheckBox() With {.Text = "生成 .gitignore", .Location = New Point(210, 285), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkIgnore)
-
-        chkReadme = New CheckBox() With {.Text = "生成 README.md", .Location = New Point(340, 220), .AutoSize = True, .Checked = True}
+        chkReadme = New CheckBox() With {.Text = "生成 README.md", .Location = New Point(340, 285), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkReadme)
-
-        chkCreateRepo = New CheckBox() With {.Text = "自动建远程仓库", .Location = New Point(90, 250), .AutoSize = True, .Checked = True}
+        chkCreateRepo = New CheckBox() With {.Text = "自动建远程仓库", .Location = New Point(90, 315), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkCreateRepo)
-
-        chkForce = New CheckBox() With {.Text = "强制覆盖推送（--force）", .Location = New Point(240, 250), .AutoSize = True, .Checked = False}
+        chkForce = New CheckBox() With {.Text = "强制覆盖推送（--force）", .Location = New Point(240, 315), .AutoSize = True, .Checked = False}
         pnlPush.Controls.Add(chkForce)
 
-        ' ---- 按钮 ----
-        btnSettings = New Button() With {.Text = "设置", .Location = New Point(90, 285), .Size = New Size(90, 32), .UseVisualStyleBackColor = True}
+        ' 按钮
+        btnSettings = New Button() With {.Text = "设置", .Location = New Point(90, 350), .Size = New Size(90, 32), .UseVisualStyleBackColor = True}
         pnlPush.Controls.Add(btnSettings)
-
-        btnPush = New Button() With {.Text = "创建并推送", .Location = New Point(330, 285), .Size = New Size(160, 32), .UseVisualStyleBackColor = True}
+        btnPush = New Button() With {.Text = "创建并推送", .Location = New Point(330, 350), .Size = New Size(160, 32), .UseVisualStyleBackColor = True}
         pnlPush.Controls.Add(btnPush)
 
-        ' 提示文字
-        Dim lblHint As New Label() With {
+        ' 提示
+        lblHint = New Label() With {
             .Text = "提示：可把项目文件夹拖到窗口自动填入项目路径",
-            .Location = New Point(10, 330),
+            .Location = New Point(10, 395),
             .AutoSize = True,
             .ForeColor = Color.Gray
         }
         pnlPush.Controls.Add(lblHint)
 
-        ' ============ 中间：README 面板 ============
+        ' ========== 中间：README 面板 ==========
         pnlReadme = New Panel() With {
             .Location = New Point(520, 10),
-            .Size = New Size(330, 450),
+            .Size = New Size(330, 480),
             .BorderStyle = BorderStyle.FixedSingle
         }
         Me.Controls.Add(pnlReadme)
@@ -183,7 +211,7 @@ Public Class MainForm
 
         txtReadme = New TextBox() With {
             .Location = New Point(10, 35),
-            .Size = New Size(308, 405),
+            .Size = New Size(308, 435),
             .Multiline = True,
             .ScrollBars = ScrollBars.Both,
             .WordWrap = False,
@@ -193,10 +221,10 @@ Public Class MainForm
         }
         pnlReadme.Controls.Add(txtReadme)
 
-        ' ============ 右侧：仓库管理面板 ============
+        ' ========== 右侧：仓库管理面板 ==========
         pnlRepoMgr = New Panel() With {
             .Location = New Point(860, 10),
-            .Size = New Size(305, 450),
+            .Size = New Size(370, 480),
             .BorderStyle = BorderStyle.FixedSingle
         }
         Me.Controls.Add(pnlRepoMgr)
@@ -209,40 +237,32 @@ Public Class MainForm
         }
         pnlRepoMgr.Controls.Add(lblRepoMgrTitle)
 
-        ' 搜索框
-        Dim lblSearch As New Label() With {.Text = "搜索：", .Location = New Point(10, 45), .AutoSize = True}
+        lblSearch = New Label() With {.Text = "搜索：", .Location = New Point(10, 45), .AutoSize = True}
         pnlRepoMgr.Controls.Add(lblSearch)
-
         txtSearch = New TextBox() With {.Location = New Point(55, 42), .Size = New Size(160, 23)}
         pnlRepoMgr.Controls.Add(txtSearch)
-
         btnRefresh = New Button() With {.Text = "刷新", .Location = New Point(220, 41), .Size = New Size(75, 25), .UseVisualStyleBackColor = True}
         pnlRepoMgr.Controls.Add(btnRefresh)
 
-        ' 状态标签
         lblStatus = New Label() With {.Text = "未加载", .Location = New Point(10, 72), .AutoSize = True, .ForeColor = Color.Gray}
         pnlRepoMgr.Controls.Add(lblStatus)
 
-        ' 仓库列表
         lstRepos = New CheckedListBox() With {
             .Location = New Point(10, 95),
-            .Size = New Size(285, 285),
+            .Size = New Size(350, 315),
             .CheckOnClick = True,
             .Font = New Font("Consolas", 9.0F),
             .Anchor = AnchorStyles.Top Or AnchorStyles.Bottom Or AnchorStyles.Left Or AnchorStyles.Right
         }
         pnlRepoMgr.Controls.Add(lstRepos)
 
-        ' 底部按钮
-        btnSelectAll = New Button() With {.Text = "全选", .Location = New Point(10, 390), .Size = New Size(70, 30), .UseVisualStyleBackColor = True}
+        btnSelectAll = New Button() With {.Text = "全选", .Location = New Point(10, 420), .Size = New Size(70, 30), .UseVisualStyleBackColor = True}
         pnlRepoMgr.Controls.Add(btnSelectAll)
-
-        btnInvert = New Button() With {.Text = "反选", .Location = New Point(85, 390), .Size = New Size(70, 30), .UseVisualStyleBackColor = True}
+        btnInvert = New Button() With {.Text = "反选", .Location = New Point(85, 420), .Size = New Size(70, 30), .UseVisualStyleBackColor = True}
         pnlRepoMgr.Controls.Add(btnInvert)
-
         btnDelete = New Button() With {
             .Text = "删除选中",
-            .Location = New Point(190, 390),
+            .Location = New Point(190, 420),
             .Size = New Size(105, 30),
             .BackColor = Color.IndianRed,
             .ForeColor = Color.White,
@@ -251,10 +271,10 @@ Public Class MainForm
         btnDelete.FlatAppearance.BorderSize = 0
         pnlRepoMgr.Controls.Add(btnDelete)
 
-        ' ============ 底部：日志 ============
+        ' ========== 底部：日志 ==========
         txtLog = New TextBox() With {
-            .Location = New Point(10, 470),
-            .Size = New Size(1155, 280),
+            .Location = New Point(10, 500),
+            .Size = New Size(1155, 170),
             .Multiline = True,
             .ScrollBars = ScrollBars.Vertical,
             .Font = New Font("Consolas", 9.0F),
@@ -265,32 +285,28 @@ Public Class MainForm
         }
         Me.Controls.Add(txtLog)
 
-        ' ============ 事件绑定 ============
+        ' ========== 事件绑定 ==========
         AddHandler btnBrowse.Click, AddressOf btnBrowse_Click
+        AddHandler chkTag.CheckedChanged, Sub()
+                                              If chkTag.Checked Then
+                                                  txtTag.Text = txtVersion.Text.Trim()
+                                              Else
+                                                  txtTag.Text = ""
+                                              End If
+                                          End Sub
         AddHandler btnPush.Click, AddressOf btnPush_Click
         AddHandler btnSettings.Click, AddressOf btnSettings_Click
+        AddHandler btnUpgradeVersion.Click, AddressOf btnUpgradeVersion_Click
         AddHandler txtProject.TextChanged, AddressOf txtProject_TextChanged
         AddHandler btnRefresh.Click, AddressOf btnRefresh_Click
         AddHandler txtSearch.TextChanged, AddressOf txtSearch_TextChanged
         AddHandler btnSelectAll.Click, AddressOf btnSelectAll_Click
         AddHandler btnInvert.Click, AddressOf btnInvert_Click
         AddHandler btnDelete.Click, AddressOf btnDelete_Click
-        AddHandler Me.DragEnter, AddressOf MainForm_DragEnter
-        AddHandler Me.DragDrop, AddressOf MainForm_DragDrop
         AddHandler Me.FormClosing, AddressOf MainForm_FormClosing
         AddHandler Me.Shown, AddressOf MainForm_Shown
 
-        ' ============ 加载配置 ============
-        LoadConfig()
-        If currentUser = "" Then currentUser = "TheRoadWind"
-        If currentGit = "" OrElse Not File.Exists(currentGit) Then
-            currentGit = DetectGit("")
-        End If
 
-        ' 默认 README 模板
-        If String.IsNullOrWhiteSpace(txtReadme.Text) Then
-            txtReadme.Text = DefaultReadme("")
-        End If
     End Sub
 
     ' ==================== 窗体首次显示 ====================
@@ -305,7 +321,6 @@ Public Class MainForm
         Dim token = txtToken.Text.Trim()
         allRepos.Clear()
         lstRepos.Items.Clear()
-        isRepoLoaded = False
 
         If token = "" Then
             lblStatus.Text = "未填写 PAT"
@@ -346,14 +361,28 @@ Public Class MainForm
                         If info.UpdatedAt.Length >= 10 Then info.UpdatedAt = info.UpdatedAt.Substring(0, 10)
                         allRepos.Add(info)
                     Next
-
+                    ' 批量拉每个仓库的最新 tag（放在同一 Using client 里，走同一个 client）
+                    For Each info In allRepos
+                        Try
+                            Dim tagUrl = $"https://api.github.com/repos/{currentUser}/{info.Name}/tags?per_page=1"
+                            Dim tagResp = Await client.GetAsync(tagUrl)
+                            If tagResp.IsSuccessStatusCode Then
+                                Dim tagJson = Await tagResp.Content.ReadAsStringAsync()
+                                Dim tagArr = SimpleJsonParser.ParseArray(tagJson)
+                                If tagArr.Count > 0 Then
+                                    info.LatestTag = SimpleJsonParser.GetString(tagArr(0), "name")
+                                End If
+                            End If
+                        Catch
+                            ' 单个仓库失败不影响整体
+                        End Try
+                    Next
                     If arr.Count < 100 Then Exit Do
                     page += 1
                 Loop
 
                 ApplyFilter()
                 lblStatus.Text = $"共 {allRepos.Count} 个仓库"
-                isRepoLoaded = True
             End Using
         Catch ex As Exception
             lblStatus.Text = "加载异常：" & ex.Message
@@ -373,29 +402,7 @@ Public Class MainForm
             End If
         Next
     End Sub
-
-    ' ==================== 拖拽 ====================
-    ''' <summary>拖入文件时判定：只接受文件夹</summary>
-    Private Sub MainForm_DragEnter(sender As Object, e As DragEventArgs)
-        If e.Data.GetDataPresent(DataFormats.FileDrop) Then
-            Dim paths = CType(e.Data.GetData(DataFormats.FileDrop), String())
-            If paths IsNot Nothing AndAlso paths.Length > 0 AndAlso Directory.Exists(paths(0)) Then
-                e.Effect = DragDropEffects.Copy
-                Return
-            End If
-        End If
-        e.Effect = DragDropEffects.None
-    End Sub
-
-    ''' <summary>拖入文件夹后写入项目路径</summary>
-    Private Sub MainForm_DragDrop(sender As Object, e As DragEventArgs)
-        Dim paths = CType(e.Data.GetData(DataFormats.FileDrop), String())
-        If paths Is Nothing OrElse paths.Length = 0 Then Return
-        If Not Directory.Exists(paths(0)) Then Return
-        txtProject.Text = paths(0)
-    End Sub
-
-    ''' <summary>项目路径变化时自动拼出仓库地址</summary>
+    ''' <summary>项目路径变化时自动拼仓库地址并读取 .vbproj 版本号</summary>
     Private Sub txtProject_TextChanged(sender As Object, e As EventArgs)
         Dim dir = txtProject.Text.Trim()
         If dir = "" Then Return
@@ -403,6 +410,18 @@ Public Class MainForm
             Dim name = New DirectoryInfo(dir).Name
             If name <> "" Then
                 txtRepo.Text = $"https://github.com/{currentUser}/{name}.git"
+            End If
+
+            ' 自动读取 .vbproj 版本号
+            Dim v = ReadProjectVersion(dir)
+            If v <> "" Then txtVersion.Text = v Else txtVersion.Text = "1.0.0.0"
+
+            ' 自动读取 README.md 内容
+            Dim readmePath = Path.Combine(dir, "README.md")
+            If File.Exists(readmePath) Then
+                txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
+            Else
+                txtReadme.Text = DefaultReadme(name)
             End If
         Catch
         End Try
@@ -427,7 +446,7 @@ Public Class MainForm
         Dim newGit = InputBox("git.exe 路径（留空 = 自动探测）：", "设置", currentGit)
 
         currentUser = newUser.Trim()
-        If currentUser = "" Then currentUser = "TheRoadWind"
+        If currentUser = "" Then currentUser = InputBox("GitHub 用户名：", "设置", currentUser)
 
         Dim g = newGit.Trim()
         If g <> "" AndAlso Not File.Exists(g) Then
@@ -444,32 +463,101 @@ Public Class MainForm
                         "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
     End Sub
 
-    ' ==================== 仓库管理：刷新 / 搜索 / 全选 / 反选 / 删除 ====================
-    ''' <summary>刷新按钮：重新加载仓库列表</summary>
+    ' ==================== 确认升级版本号 ====================
+    ''' <summary>确认升级：写回 .vbproj → 重读版本号 → 同步 README 里的版本号</summary>
+    Private Sub btnUpgradeVersion_Click(sender As Object, e As EventArgs)
+        Dim projectPath = txtProject.Text.Trim()
+        If projectPath = "" OrElse Not Directory.Exists(projectPath) Then
+            MessageBox.Show("请先选择有效的项目路径！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Return
+        End If
+
+        Dim newVer = txtVersion.Text.Trim()
+        If newVer = "" Then
+            MessageBox.Show("版本号不能为空！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Return
+        End If
+
+        ' 旧版本号（用于同步 README）
+        Dim oldVer = ReadProjectVersion(projectPath)
+
+        ' 写入 .vbproj
+        WriteProjectVersion(projectPath, newVer)
+
+        ' 重读，显示实际值
+        Dim realVer = ReadProjectVersion(projectPath)
+        If realVer <> "" Then txtVersion.Text = realVer
+
+        ' 同步 README 里的版本号
+        If oldVer <> "" AndAlso realVer <> "" AndAlso oldVer <> realVer Then
+            SyncReadmeVersion(oldVer, realVer)
+            Log($"==> [版本号] README 中的 {oldVer} 已同步为 {realVer}")
+        ElseIf oldVer = "" AndAlso realVer <> "" Then
+            SyncReadmeVersion("1.0.0", realVer)
+            Log($"==> [版本号] README 中的 1.0.0 已同步为 {realVer}")
+        End If
+
+        SaveConfig()
+
+        '重新读取 README.md 内容
+
+        Dim readmePath = Path.Combine(projectPath, "README.md")
+        If File.Exists(readmePath) Then
+            txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
+        Else
+            txtReadme.Text = DefaultReadme(New DirectoryInfo(projectPath).Name)
+        End If
+        MessageBox.Show($"版本号已升级到：{realVer}" & vbCrLf & "README 已同步。",
+                        "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
+    End Sub
+
+    ''' <summary>把 README 文本里出现的旧版本号替换为新版本号</summary>
+    Private Sub SyncReadmeVersion(oldVer As String, newVer As String)
+        If oldVer = "" OrElse newVer = "" OrElse oldVer = newVer Then Return
+        Dim text = txtReadme.Text
+        If String.IsNullOrEmpty(text) Then Return
+
+        ' 情况 A：`### vX.Y.Z` / `### X.Y.Z`
+        text = Regex.Replace(text,
+            "###\s*v?" & Regex.Escape(oldVer) & "(?=\s|\(|\r|\n|$)",
+            "### v" & newVer,
+            RegexOptions.IgnoreCase)
+
+        ' 情况 B：其它裸版本号
+        text = Regex.Replace(text,
+            "(?<![\w\.])v?" & Regex.Escape(oldVer) & "(?![\w\.])",
+            "v" & newVer,
+            RegexOptions.IgnoreCase)
+
+        txtReadme.Text = text
+    End Sub
+
+    ' ==================== 仓库管理按钮 ====================
+    ''' <summary>刷新按钮</summary>
     Private Async Sub btnRefresh_Click(sender As Object, e As EventArgs)
         Await LoadRepoListAsync()
     End Sub
 
-    ''' <summary>搜索框内容变化：实时过滤</summary>
+    ''' <summary>搜索内容变化</summary>
     Private Sub txtSearch_TextChanged(sender As Object, e As EventArgs)
         ApplyFilter()
     End Sub
 
-    ''' <summary>全选按钮</summary>
+    ''' <summary>全选</summary>
     Private Sub btnSelectAll_Click(sender As Object, e As EventArgs)
         For i = 0 To lstRepos.Items.Count - 1
             lstRepos.SetItemChecked(i, True)
         Next
     End Sub
 
-    ''' <summary>反选按钮</summary>
+    ''' <summary>反选</summary>
     Private Sub btnInvert_Click(sender As Object, e As EventArgs)
         For i = 0 To lstRepos.Items.Count - 1
             lstRepos.SetItemChecked(i, Not lstRepos.GetItemChecked(i))
         Next
     End Sub
 
-    ''' <summary>删除选中按钮：二次确认后删除</summary>
+    ''' <summary>删除选中仓库</summary>
     Private Async Sub btnDelete_Click(sender As Object, e As EventArgs)
         Dim token = txtToken.Text.Trim()
         If token = "" Then
@@ -490,7 +578,6 @@ Public Class MainForm
             Return
         End If
 
-        ' 二次确认：输入 DELETE
         Dim names = String.Join(vbCrLf, selected.Select(Function(r) "  • " & r.Name))
         Dim confirm As String = InputBox("即将删除以下 " & selected.Count & " 个仓库（不可恢复）：" & vbCrLf & vbCrLf & names & vbCrLf & vbCrLf & "请输入 DELETE 以确认：", "危险操作确认", "")
         If confirm <> "DELETE" Then
@@ -500,7 +587,6 @@ Public Class MainForm
 
         btnDelete.Enabled = False
         lblStatus.Text = "删除中..."
-
         Dim okCount = 0
         Dim failList As New List(Of String)
 
@@ -594,45 +680,106 @@ Public Class MainForm
         Return ""
     End Function
 
+    ' ==================== 项目版本号读写 ====================
+    ''' <summary>在项目目录里找 .vbproj 并读取版本号（Version &gt; AssemblyVersion &gt; FileVersion）</summary>
+    Private Function ReadProjectVersion(projectDir As String) As String
+        Try
+            Dim projFiles = Directory.GetFiles(projectDir, "*.vbproj", SearchOption.TopDirectoryOnly)
+            If projFiles.Length = 0 Then Return ""
+            Dim content = File.ReadAllText(projFiles(0), Encoding.UTF8)
+
+            Dim v = GetXmlTagValue(content, "Version")
+            If v <> "" Then Return v
+            v = GetXmlTagValue(content, "AssemblyVersion")
+            If v <> "" Then Return v
+            v = GetXmlTagValue(content, "FileVersion")
+            If v <> "" Then Return v
+        Catch
+        End Try
+        Return ""
+    End Function
+
+    ''' <summary>取 &lt;tag&gt;...&lt;/tag&gt; 的值</summary>
+    Private Function GetXmlTagValue(xml As String, tag As String) As String
+        Dim m = Regex.Match(xml, "<" & tag & ">(.*?)</" & tag & ">", RegexOptions.IgnoreCase)
+        If m.Success Then Return m.Groups(1).Value.Trim()
+        Return ""
+    End Function
+
+    ''' <summary>把版本号写回 .vbproj（Version / AssemblyVersion / FileVersion；Version 不存在时自动插入）</summary>
+    Private Sub WriteProjectVersion(projectDir As String, version As String)
+        If version = "" Then Return
+        Try
+            Dim projFiles = Directory.GetFiles(projectDir, "*.vbproj", SearchOption.TopDirectoryOnly)
+            If projFiles.Length = 0 Then
+                Log("==> [版本号] 未找到 .vbproj，跳过")
+                Return
+            End If
+
+            Dim path = projFiles(0)
+            Dim content = File.ReadAllText(path, Encoding.UTF8)
+
+            ' Version：不存在则插入
+            content = EnsureXmlTag(content, "Version", version)
+            ' AssemblyVersion / FileVersion：存在才替换
+            content = ReplaceXmlTagIfExists(content, "AssemblyVersion", version)
+            content = ReplaceXmlTagIfExists(content, "FileVersion", version)
+
+            File.WriteAllText(path, content, New UTF8Encoding(False))
+            Log($"==> [版本号] 已写入 {IO.Path.GetFileName(path)}：{version}")
+        Catch ex As Exception
+            Log("==> [版本号] 写入失败：" & ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>确保 &lt;tag&gt; 存在；不存在则插入到第一个 PropertyGroup 内</summary>
+    Private Function EnsureXmlTag(xml As String, tag As String, value As String) As String
+        If Regex.IsMatch(xml, "<" & tag & ">", RegexOptions.IgnoreCase) Then
+            Return Regex.Replace(xml, "(<" & tag & ">)(.*?)(</" & tag & ">)",
+                                 "${1}" & value & "${3}", RegexOptions.IgnoreCase)
+        End If
+        ' 插入到第一个 <PropertyGroup> 之后
+        Dim m = Regex.Match(xml, "<PropertyGroup[^>]*>", RegexOptions.IgnoreCase)
+        If m.Success Then
+            Dim insertPos = m.Index + m.Length
+            Dim insertText = vbCrLf & "    <" & tag & ">" & value & "</" & tag & ">"
+            Return xml.Substring(0, insertPos) & insertText & xml.Substring(insertPos)
+        End If
+        Return xml
+    End Function
+
+    ''' <summary>仅当 &lt;tag&gt; 存在时才替换</summary>
+    Private Function ReplaceXmlTagIfExists(xml As String, tag As String, value As String) As String
+        If Not Regex.IsMatch(xml, "<" & tag & ">", RegexOptions.IgnoreCase) Then Return xml
+        Return Regex.Replace(xml, "(<" & tag & ">)(.*?)(</" & tag & ">)",
+                             "${1}" & value & "${3}", RegexOptions.IgnoreCase)
+    End Function
+
     ' ==================== 配置读写 ====================
     ''' <summary>读取配置</summary>
     Private Sub LoadConfig()
         Try
             If Not File.Exists(configFile) Then Return
-            Dim readmeBuilder As New StringBuilder()
-            Dim inReadmeSection As Boolean = False
 
             For Each line In File.ReadAllLines(configFile, Encoding.UTF8)
-                If line.Trim() = "[readme]" Then
-                    inReadmeSection = True
-                    Continue For
-                End If
-                If inReadmeSection Then
-                    readmeBuilder.AppendLine(line)
-                    Continue For
-                End If
-
                 If String.IsNullOrWhiteSpace(line) OrElse line.StartsWith("#") Then Continue For
                 Dim idx = line.IndexOf("="c)
                 If idx <= 0 Then Continue For
                 Dim k = line.Substring(0, idx).Trim()
                 Dim v = line.Substring(idx + 1).Trim()
                 Select Case k
-                    Case "user" : currentUser = If(v = "", "TheRoadWind", v)
+                    Case "user" : currentUser = If(v = "", InputBox("GitHub 用户名：", "设置", currentUser), v)
                     Case "email" : txtEmail.Text = v
                     Case "token" : txtToken.Text = v
                     Case "git" : If File.Exists(v) Then currentGit = v
                 End Select
             Next
-
-            Dim r = readmeBuilder.ToString()
-            If r <> "" Then txtReadme.Text = r.TrimEnd()
         Catch ex As Exception
             Log("读取配置失败：" & ex.Message)
         End Try
     End Sub
 
-    ''' <summary>写入配置</summary>
+    ''' <summary>写入配置（不保存 README）</summary>
     Private Sub SaveConfig()
         Try
             If Not Directory.Exists(configDir) Then Directory.CreateDirectory(configDir)
@@ -647,12 +794,15 @@ Public Class MainForm
             sb.AppendLine("email=" & txtEmail.Text.Trim())
             sb.AppendLine("token=" & txtToken.Text.Trim())
             sb.AppendLine("git=" & currentGit)
-            sb.AppendLine()
-            sb.AppendLine("# README 内容（多行，直到文件末尾）")
-            sb.AppendLine("[readme]")
-            sb.Append(txtReadme.Text)
 
             File.WriteAllText(configFile, sb.ToString(), New UTF8Encoding(False))
+
+            '自动保存 README 内容到配置目录
+            If txtProject.Text.Trim() <> "" Then
+                Dim projectPath = txtProject.Text.Trim()
+                Dim readmePath = Path.Combine(projectPath, "README.md")
+                File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
+            End If
         Catch ex As Exception
             Log("保存配置失败：" & ex.Message)
         End Try
@@ -664,7 +814,7 @@ Public Class MainForm
     End Sub
 
     ' ==================== 推送主流程 ====================
-    ''' <summary>推送按钮：完整执行 init/add/commit/push 流程（可强制覆盖）</summary>
+    ''' <summary>推送按钮：init → add → commit → tag → push（版本号由“确认升级”按钮控制）</summary>
     Private Async Sub btnPush_Click(sender As Object, e As EventArgs)
         Dim projectPath = txtProject.Text.Trim()
         Dim repoUrl = txtRepo.Text.Trim()
@@ -674,7 +824,7 @@ Public Class MainForm
         Dim commitMsg = txtMsg.Text.Trim()
         Dim gitExe = If(currentGit <> "" AndAlso File.Exists(currentGit), currentGit, "git")
 
-        ' ---- 基础校验 ----
+        ' ---- 校验 ----
         If projectPath = "" OrElse Not Directory.Exists(projectPath) Then
             MessageBox.Show("项目路径无效！", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
             Return
@@ -684,6 +834,19 @@ Public Class MainForm
             Return
         End If
         If commitMsg = "" Then commitMsg = "初始化提交"
+
+        ' 版本号一致性检查（可选增强）
+        Dim projVer = ReadProjectVersion(projectPath)
+        If projVer <> "" AndAlso projVer <> txtVersion.Text.Trim() Then
+            Dim r = MessageBox.Show(
+                $"当前 .vbproj 里的版本号是 {projVer}，" & vbCrLf &
+                $"界面里填的是 {txtVersion.Text.Trim()}。" & vbCrLf & vbCrLf &
+                "是否先执行「确认升级」？",
+                "版本号不一致", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+            If r = DialogResult.Yes Then
+                btnUpgradeVersion_Click(Nothing, Nothing)
+            End If
+        End If
 
         SaveConfig()
         btnPush.Enabled = False
@@ -715,7 +878,7 @@ Public Class MainForm
                 End If
             End If
 
-            ' README.md：用编辑框内容写入（每次覆盖）
+            ' README.md
             If chkReadme.Checked Then
                 Dim readmePath = Path.Combine(projectPath, "README.md")
                 Dim projName = New DirectoryInfo(projectPath).Name
@@ -747,7 +910,7 @@ Public Class MainForm
                 End If
             End If
 
-            ' 推送地址
+            ' 远程地址
             Dim pushUrl = repoUrl
             If token <> "" Then
                 pushUrl = InjectToken(repoUrl, userName, token)
@@ -776,7 +939,32 @@ Public Class MainForm
             Log("==> git branch -M main")
             Await RunGitAsync(gitExe, projectPath, "branch -M main")
 
-            ' 强制覆盖
+            ' ---- 打 tag ----
+            If chkTag.Checked Then
+                Dim tagName = txtTag.Text.Trim()
+                If tagName = "" Then
+                    Dim segs = txtVersion.Text.Trim().Split("."c)
+                    If segs.Length >= 3 Then
+                        tagName = "v" & segs(0) & "." & segs(1) & "." & segs(2)
+                    Else
+                        tagName = "v" & txtVersion.Text.Trim()
+                    End If
+                    txtTag.Text = tagName
+                End If
+
+                ' 先删除远程可能存在的所有历史 tag（同名或不同名）
+                Log("==> 清理远程历史 tag")
+                Await DeleteAllRemoteTagsAsync(gitExe, projectPath)
+
+                ' 删除本地同名 tag（如有）
+                Await RunGitAsync(gitExe, projectPath, $"tag -d ""{tagName}""", ignoreError:=True)
+
+                ' 重新打 tag
+                Log($"==> git tag {tagName}")
+                Await RunGitAsync(gitExe, projectPath, $"tag ""{tagName}""", ignoreError:=True)
+            End If
+
+            ' ---- 推代码 ----
             If chkForce.Checked Then
                 Log("==> git push -u origin main --force（强制覆盖）")
                 Await RunGitAsync(gitExe, projectPath, "push -u origin main --force")
@@ -785,13 +973,18 @@ Public Class MainForm
                 Await RunGitAsync(gitExe, projectPath, "push -u origin main")
             End If
 
+            ' ---- 推 tag ----
+            If chkTag.Checked AndAlso txtTag.Text.Trim() <> "" Then
+                Log($"==> git push origin {txtTag.Text.Trim()} --force")
+                Await RunGitAsync(gitExe, projectPath, $"push origin ""{txtTag.Text.Trim()}"" --force", ignoreError:=True)
+            End If
+
             ' 还原远程地址
             If token <> "" Then
                 Await RunGitAsync(gitExe, projectPath, $"remote set-url origin ""{repoUrl}""")
             End If
 
             Log(vbCrLf & "===== 推送完成 =====")
-            ' 刷新仓库列表
             Await LoadRepoListAsync()
             MessageBox.Show("推送成功！", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
         Catch ex As Exception
@@ -827,7 +1020,59 @@ Public Class MainForm
                        End Sub)
         Return result
     End Function
+    ''' <summary>删除远程仓库里的所有 tag（逐个删除；本地保留）</summary>
+    Private Async Function DeleteAllRemoteTagsAsync(gitExe As String, workDir As String) As Task
+        ' 1) 列出远程所有 tag
+        Dim remoteTags As New List(Of String)
+        Try
+            Dim psi As New ProcessStartInfo() With {
+            .FileName = gitExe,
+            .Arguments = "ls-remote --tags origin",
+            .WorkingDirectory = workDir,
+            .RedirectStandardOutput = True,
+            .UseShellExecute = False,
+            .CreateNoWindow = True
+        }
+            Dim output As String = ""
+            Await Task.Run(Sub()
+                               Using p As Process = Process.Start(psi)
+                                   output = p.StandardOutput.ReadToEnd()
+                                   p.WaitForExit()
+                               End Using
+                           End Sub)
 
+            ' 输出示例：
+            '   3f2a1b...	refs/tags/v1.0.0
+            '   9d8e7c...	refs/tags/v1.0.0^{}
+            For Each line In output.Split({ControlChars.Cr, ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries)
+                Dim parts = line.Split(ControlChars.Tab)
+                If parts.Length >= 2 Then
+                    Dim refName = parts(1).Trim()
+                    If refName.StartsWith("refs/tags/") AndAlso Not refName.EndsWith("^{}") Then
+                        Dim tagName = refName.Substring("refs/tags/".Length)
+                        If Not remoteTags.Contains(tagName) Then remoteTags.Add(tagName)
+                    End If
+                End If
+            Next
+        Catch ex As Exception
+            Log("    [tag] 列出远程 tag 失败：" & ex.Message)
+        End Try
+
+        ' 2) 逐个删除远程 tag
+        For Each t In remoteTags
+            Log($"    删除远程 tag：{t}")
+            Await RunGitAsync(gitExe, workDir, $"push origin :refs/tags/{t}", ignoreError:=True)
+        Next
+
+        ' 3) 同步清理本地 tag（可选，避免本地堆积）
+        For Each t In remoteTags
+            Await RunGitAsync(gitExe, workDir, $"tag -d ""{t}""", ignoreError:=True)
+        Next
+
+        If remoteTags.Count = 0 Then
+            Log("    没有需要清理的历史 tag")
+        End If
+    End Function
     ''' <summary>把 PAT 注入到 https 地址中</summary>
     Private Function InjectToken(repoUrl As String, user As String, token As String) As String
         If Not repoUrl.StartsWith("https://") Then Return repoUrl
@@ -986,7 +1231,7 @@ Public Class MainForm
                ".vscode/" & vbCrLf
     End Function
 
-    ''' <summary>默认 README 内容（含占位符）</summary>
+    ''' <summary>默认 README 内容</summary>
     Private Function DefaultReadme(projName As String) As String
         Dim sb As New StringBuilder()
         sb.AppendLine("# {项目名}")
@@ -1051,9 +1296,12 @@ Public Class MainForm
         Public Property IsPrivate As Boolean
         Public Property UpdatedAt As String
         Public Property FullName As String
+        Public Property LatestTag As String   ' 最新 tag，没有则为空
+
         Public Overrides Function ToString() As String
             Dim vis = If(IsPrivate, "私有", "公开")
-            Return $"{Name}    [{vis}]    {UpdatedAt}"
+            Dim tagText = If(String.IsNullOrEmpty(LatestTag), "-", LatestTag)
+            Return $"{Name}    [{vis}]    {tagText}    {UpdatedAt}"
         End Function
     End Class
 
