@@ -402,8 +402,9 @@ Public Class MainForm
             End If
         Next
     End Sub
-    ''' <summary>项目路径变化时自动拼仓库地址并读取 .vbproj 版本号</summary>
     Private Sub txtProject_TextChanged(sender As Object, e As EventArgs)
+        If suppressProjectChanged Then Return   ' 抑制期间不动
+
         Dim dir = txtProject.Text.Trim()
         If dir = "" Then Return
         Try
@@ -411,6 +412,9 @@ Public Class MainForm
             If name <> "" Then
                 txtRepo.Text = $"https://github.com/{currentUser}/{name}.git"
             End If
+
+            ' 记录有效路径
+            lastProjectPath = dir
 
             ' 自动读取 .vbproj 版本号
             Dim v = ReadProjectVersion(dir)
@@ -464,7 +468,7 @@ Public Class MainForm
     End Sub
 
     ' ==================== 确认升级版本号 ====================
-    ''' <summary>确认升级：写回 .vbproj → 重读版本号 → 同步 README 里的版本号</summary>
+    ''' <summary>确认升级：写回 .vbproj → 重读版本号 → 同步 README 并写回磁盘</summary>
     Private Sub btnUpgradeVersion_Click(sender As Object, e As EventArgs)
         Dim projectPath = txtProject.Text.Trim()
         If projectPath = "" OrElse Not Directory.Exists(projectPath) Then
@@ -478,59 +482,132 @@ Public Class MainForm
             Return
         End If
 
-        ' 旧版本号（用于同步 README）
-        Dim oldVer = ReadProjectVersion(projectPath)
+        suppressProjectChanged = True
+        Try
+            ' 旧版本号
+            Dim oldVer = ReadProjectVersion(projectPath)
 
-        ' 写入 .vbproj
-        WriteProjectVersion(projectPath, newVer)
+            ' 写回 .vbproj
+            WriteProjectVersion(projectPath, newVer)
 
-        ' 重读，显示实际值
-        Dim realVer = ReadProjectVersion(projectPath)
-        If realVer <> "" Then txtVersion.Text = realVer
+            ' 重读实际值
+            Dim realVer = ReadProjectVersion(projectPath)
+            If realVer <> "" Then txtVersion.Text = realVer
 
-        ' 同步 README 里的版本号
-        If oldVer <> "" AndAlso realVer <> "" AndAlso oldVer <> realVer Then
-            SyncReadmeVersion(oldVer, realVer)
-            Log($"==> [版本号] README 中的 {oldVer} 已同步为 {realVer}")
-        ElseIf oldVer = "" AndAlso realVer <> "" Then
-            SyncReadmeVersion("1.0.0", realVer)
-            Log($"==> [版本号] README 中的 1.0.0 已同步为 {realVer}")
-        End If
+            ' 同步 README 文本（内存）
+            If oldVer <> "" AndAlso realVer <> "" AndAlso oldVer <> realVer Then
+                SyncReadmeVersion(oldVer, realVer)
+                Log($"==> [版本号] README 中的 {oldVer} 已同步为 {realVer}")
+            ElseIf oldVer = "" AndAlso realVer <> "" Then
+                SyncReadmeVersion("1.0.0", realVer)
+                Log($"==> [版本号] README 中的 1.0.0 已同步为 {realVer}")
+            End If
 
-        SaveConfig()
+            ' 关键：把同步后的 README 立刻写回磁盘
+            Dim readmePath = Path.Combine(projectPath, "README.md")
+            Try
+                If Not String.IsNullOrWhiteSpace(txtReadme.Text) Then
+                    File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
+                    Log("==> README.md 已写入磁盘")
+                Else
+                    Log("==> 文本框为空，跳过写 README.md")
+                End If
+            Catch ex As Exception
+                Log("==> 写 README.md 失败：" & ex.Message)
+                MessageBox.Show("写 README.md 失败：" & ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            End Try
 
-        '重新读取 README.md 内容
+            SaveConfig()
 
-        Dim readmePath = Path.Combine(projectPath, "README.md")
-        If File.Exists(readmePath) Then
-            txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
-        Else
-            txtReadme.Text = DefaultReadme(New DirectoryInfo(projectPath).Name)
-        End If
-        MessageBox.Show($"版本号已升级到：{realVer}" & vbCrLf & "README 已同步。",
+            ' 从磁盘重读（此时磁盘已是新内容）
+            If File.Exists(readmePath) Then
+                txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
+            Else
+                txtReadme.Text = DefaultReadme(New DirectoryInfo(projectPath).Name)
+            End If
+
+            MessageBox.Show($"版本号已升级到：{realVer}" & vbCrLf & "README 已同步。",
                         "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
+        Finally
+            suppressProjectChanged = False
+        End Try
     End Sub
 
-    ''' <summary>把 README 文本里出现的旧版本号替换为新版本号</summary>
+    ''' <summary>
+    ''' 把 README 文本里出现的旧版本号替换为新版本号
+    ''' - 兼容 ### / ## / #### 等
+    ''' - 兼容 2.3.5.0 与 2.3.5 等长短版本号
+    ''' - 正则 + 字符串兜底
+    ''' </summary>
     Private Sub SyncReadmeVersion(oldVer As String, newVer As String)
-        If oldVer = "" OrElse newVer = "" OrElse oldVer = newVer Then Return
+        If oldVer = "" OrElse newVer = "" Then Return
+
         Dim text = txtReadme.Text
         If String.IsNullOrEmpty(text) Then Return
 
-        ' 情况 A：`### vX.Y.Z` / `### X.Y.Z`
-        text = Regex.Replace(text,
-            "###\s*v?" & Regex.Escape(oldVer) & "(?=\s|\(|\r|\n|$)",
-            "### v" & newVer,
+        ' ---- 1) 归一化：生成多个候选旧版本号 ----
+        Dim oldVariants As New List(Of String) From {oldVer}
+        Dim short3 = TrimTrailingZero(oldVer)      ' 2.3.5.0 -> 2.3.5
+        If short3 <> oldVer AndAlso short3 <> "" Then oldVariants.Add(short3)
+        Dim short2 = TrimTrailingZero(short3)      ' 2.3.5   -> 2.3
+        If short2 <> short3 AndAlso short2 <> "" Then oldVariants.Add(short2)
+
+        ' 新版本号也按相同规则生成短形式（用于展示）
+        Dim newShow = newVer
+        Dim newShort3 = TrimTrailingZero(newVer)   ' 2.3.6.0 -> 2.3.6
+        Dim newShort2 = TrimTrailingZero(newShort3)
+
+        ' ---- 2) 逐候选做正则替换 ----
+        Dim original = text
+
+        For Each v In oldVariants
+            ' 形如 ## 2.3.5 或 ### v2.3.5 或 #### v2.3.5 (2026-01-01)
+            text = Regex.Replace(text,
+            "(#{2,6}\s*)v?" & Regex.Escape(v) & "(?=\s|\(|\r|\n|$)",
+            "${1}v" & newShow,
             RegexOptions.IgnoreCase)
 
-        ' 情况 B：其它裸版本号
-        text = Regex.Replace(text,
-            "(?<![\w\.])v?" & Regex.Escape(oldVer) & "(?![\w\.])",
-            "v" & newVer,
+            ' 裸版本号 v2.3.5 / 2.3.5
+            text = Regex.Replace(text,
+            "(?<![\w\.])v?" & Regex.Escape(v) & "(?![\w\.])",
+            "v" & newShow,
             RegexOptions.IgnoreCase)
 
+            ' 把更新日志段落里的日期改为今天（形如 2026-09-22）
+            text = Regex.Replace(text,
+                "(###\s*v?" & Regex.Escape(newShow) & "\s*\()(\d{4}-\d{2}-\d{2})(\))",
+                "${1}" & DateTime.Now.ToString("yyyy-MM-dd") & "${3}",
+                RegexOptions.IgnoreCase)
+        Next
+
+        ' ---- 3) 再兜底做短形式替换（避免上面因长短不同而漏掉） ----
+        If newShow <> newShort3 AndAlso newShort3 <> "" Then
+            text = Regex.Replace(text,
+            "(#{2,6}\s*)v?" & Regex.Escape(newShort3) & "(?=\s|\(|\r|\n|$)",
+            "${1}v" & newShow, RegexOptions.IgnoreCase)
+        End If
+
+        ' ---- 4) 写入文本框 ----
         txtReadme.Text = text
+
+        ' ---- 5) 打印是否发生替换（便于排查） ----
+        If text = original Then
+            Log($"==> [版本号] README 中未找到任何与 {oldVer} 匹配的旧版本号，未替换")
+        Else
+            Log($"==> [版本号] README 中的 {oldVer} 已同步为 {newVer}")
+        End If
     End Sub
+
+    ''' <summary>去掉版本号末尾的 .0（2.3.5.0 -> 2.3.5；2.3.5 -> 2.3）</summary>
+    Private Function TrimTrailingZero(v As String) As String
+        If String.IsNullOrWhiteSpace(v) Then Return v
+        Dim parts = v.Split("."c).ToList()
+        ' 至少保留两段
+        While parts.Count > 2 AndAlso parts(parts.Count - 1) = "0"
+            parts.RemoveAt(parts.Count - 1)
+        End While
+        Return String.Join(".", parts)
+    End Function
 
     ' ==================== 仓库管理按钮 ====================
     ''' <summary>刷新按钮</summary>
@@ -779,7 +856,7 @@ Public Class MainForm
         End Try
     End Sub
 
-    ''' <summary>写入配置（不保存 README）</summary>
+    ''' <summary>写入配置（不保存 README；README 在按钮和关闭时单独写）</summary>
     Private Sub SaveConfig()
         Try
             If Not Directory.Exists(configDir) Then Directory.CreateDirectory(configDir)
@@ -796,15 +873,26 @@ Public Class MainForm
             sb.AppendLine("git=" & currentGit)
 
             File.WriteAllText(configFile, sb.ToString(), New UTF8Encoding(False))
-
-            '自动保存 README 内容到配置目录
-            If txtProject.Text.Trim() <> "" Then
-                Dim projectPath = txtProject.Text.Trim()
-                Dim readmePath = Path.Combine(projectPath, "README.md")
-                File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
-            End If
         Catch ex As Exception
             Log("保存配置失败：" & ex.Message)
+        End Try
+
+        ' README 单独写（不受 SaveConfig try 影响，便于报错定位）
+        WriteReadmeToDisk()
+    End Sub
+    Private lastProjectPath As String = ""   ' 上次成功加载的项目路径（用于写 README）
+    Private suppressProjectChanged As Boolean = False ' 抑制 txtProject 变更引起的重复加载
+    ''' <summary>把文本框里的 README 写回上次加载的项目路径</summary>
+    Private Sub WriteReadmeToDisk()
+        Try
+            If lastProjectPath = "" OrElse Not Directory.Exists(lastProjectPath) Then Return
+            If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
+
+            Dim readmePath = Path.Combine(lastProjectPath, "README.md")
+            File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
+            Log($"==> [README] 已写入 {readmePath}")
+        Catch ex As Exception
+            Log("==> [README] 写入失败：" & ex.Message)
         End Try
     End Sub
 
