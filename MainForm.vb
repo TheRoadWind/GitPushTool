@@ -67,8 +67,10 @@ Public Class MainForm
     Private currentUser As String = ""        ' 当前 GitHub 用户名
     Private currentGit As String = ""         ' 当前 git.exe 完整路径
     Private allRepos As New List(Of RepoInfo)() ' 当前账号下所有仓库
+    Private lastProjectPath As String = ""    ' 上次成功加载的项目路径（用于写 README）
+    Private suppressProjectChanged As Boolean = False ' 抑制 txtProject 变更引起的重复加载
 
-    ' 配置文件目录与路径:C:\Users\Administrator\AppData\Roaming\GitPushTool
+    ' 配置文件目录与路径：C:\Users\Administrator\AppData\Roaming\GitPushTool
     Private ReadOnly configDir As String =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitPushTool")
     Private ReadOnly configFile As String =
@@ -306,7 +308,18 @@ Public Class MainForm
         AddHandler Me.FormClosing, AddressOf MainForm_FormClosing
         AddHandler Me.Shown, AddressOf MainForm_Shown
 
+        ' ========== 让主窗体和所有子控件都支持拖放 ==========
+        EnableDragDropRecursive(Me)
+    End Sub
 
+    ''' <summary>递归给所有子控件启用拖放并把事件指向主窗体处理</summary>
+    Private Sub EnableDragDropRecursive(parent As Control)
+        For Each c As Control In parent.Controls
+            c.AllowDrop = True
+            AddHandler c.DragEnter, AddressOf MainForm_DragEnter
+            AddHandler c.DragDrop, AddressOf MainForm_DragDrop
+            If c.HasChildren Then EnableDragDropRecursive(c)
+        Next
     End Sub
 
     ' ==================== 窗体首次显示 ====================
@@ -361,25 +374,27 @@ Public Class MainForm
                         If info.UpdatedAt.Length >= 10 Then info.UpdatedAt = info.UpdatedAt.Substring(0, 10)
                         allRepos.Add(info)
                     Next
-                    ' 批量拉每个仓库的最新 tag（放在同一 Using client 里，走同一个 client）
-                    For Each info In allRepos
-                        Try
-                            Dim tagUrl = $"https://api.github.com/repos/{currentUser}/{info.Name}/tags?per_page=1"
-                            Dim tagResp = Await client.GetAsync(tagUrl)
-                            If tagResp.IsSuccessStatusCode Then
-                                Dim tagJson = Await tagResp.Content.ReadAsStringAsync()
-                                Dim tagArr = SimpleJsonParser.ParseArray(tagJson)
-                                If tagArr.Count > 0 Then
-                                    info.LatestTag = SimpleJsonParser.GetString(tagArr(0), "name")
-                                End If
-                            End If
-                        Catch
-                            ' 单个仓库失败不影响整体
-                        End Try
-                    Next
+
                     If arr.Count < 100 Then Exit Do
                     page += 1
                 Loop
+
+                ' 批量拉每个仓库的最新 tag
+                For Each info In allRepos
+                    Try
+                        Dim tagUrl = $"https://api.github.com/repos/{currentUser}/{info.Name}/tags?per_page=1"
+                        Dim tagResp = Await client.GetAsync(tagUrl)
+                        If tagResp.IsSuccessStatusCode Then
+                            Dim tagJson = Await tagResp.Content.ReadAsStringAsync()
+                            Dim tagArr = SimpleJsonParser.ParseArray(tagJson)
+                            If tagArr.Count > 0 Then
+                                info.LatestTag = SimpleJsonParser.GetString(tagArr(0), "name")
+                            End If
+                        End If
+                    Catch
+                        ' 单个仓库失败不影响整体
+                    End Try
+                Next
 
                 ApplyFilter()
                 lblStatus.Text = $"共 {allRepos.Count} 个仓库"
@@ -402,8 +417,31 @@ Public Class MainForm
             End If
         Next
     End Sub
+
+    ' ==================== 拖拽 ====================
+    ''' <summary>拖入文件时判定：只接受文件夹</summary>
+    Private Sub MainForm_DragEnter(sender As Object, e As DragEventArgs)
+        If e.Data.GetDataPresent(DataFormats.FileDrop) Then
+            Dim paths = CType(e.Data.GetData(DataFormats.FileDrop), String())
+            If paths IsNot Nothing AndAlso paths.Length > 0 AndAlso Directory.Exists(paths(0)) Then
+                e.Effect = DragDropEffects.Copy
+                Return
+            End If
+        End If
+        e.Effect = DragDropEffects.None
+    End Sub
+
+    ''' <summary>拖入文件夹后写入项目路径</summary>
+    Private Sub MainForm_DragDrop(sender As Object, e As DragEventArgs)
+        Dim paths = CType(e.Data.GetData(DataFormats.FileDrop), String())
+        If paths Is Nothing OrElse paths.Length = 0 Then Return
+        If Not Directory.Exists(paths(0)) Then Return
+        txtProject.Text = paths(0)
+    End Sub
+
+    ''' <summary>项目路径变化时自动拼仓库地址并读取 .vbproj 版本号</summary>
     Private Sub txtProject_TextChanged(sender As Object, e As EventArgs)
-        If suppressProjectChanged Then Return   ' 抑制期间不动
+        If suppressProjectChanged Then Return
 
         Dim dir = txtProject.Text.Trim()
         If dir = "" Then Return
@@ -484,7 +522,7 @@ Public Class MainForm
 
         suppressProjectChanged = True
         Try
-            ' 旧版本号
+            ' 旧版本号（仅用于提示，不参与匹配）
             Dim oldVer = ReadProjectVersion(projectPath)
 
             ' 写回 .vbproj
@@ -494,16 +532,12 @@ Public Class MainForm
             Dim realVer = ReadProjectVersion(projectPath)
             If realVer <> "" Then txtVersion.Text = realVer
 
-            ' 同步 README 文本（内存）
-            If oldVer <> "" AndAlso realVer <> "" AndAlso oldVer <> realVer Then
+            ' 同步 README（不再依赖 oldVer 匹配，直接替换第一条 ### 版本号）
+            If realVer <> "" Then
                 SyncReadmeVersion(oldVer, realVer)
-                Log($"==> [版本号] README 中的 {oldVer} 已同步为 {realVer}")
-            ElseIf oldVer = "" AndAlso realVer <> "" Then
-                SyncReadmeVersion("1.0.0", realVer)
-                Log($"==> [版本号] README 中的 1.0.0 已同步为 {realVer}")
             End If
 
-            ' 关键：把同步后的 README 立刻写回磁盘
+            ' 把同步后的 README 立刻写回磁盘
             Dim readmePath = Path.Combine(projectPath, "README.md")
             Try
                 If Not String.IsNullOrWhiteSpace(txtReadme.Text) Then
@@ -519,7 +553,7 @@ Public Class MainForm
 
             SaveConfig()
 
-            ' 从磁盘重读（此时磁盘已是新内容）
+            ' 从磁盘重读
             If File.Exists(readmePath) Then
                 txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
             Else
@@ -527,79 +561,100 @@ Public Class MainForm
             End If
 
             MessageBox.Show($"版本号已升级到：{realVer}" & vbCrLf & "README 已同步。",
-                        "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
+                            "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
         Finally
             suppressProjectChanged = False
         End Try
     End Sub
 
+    ' ==================== README 版本号同步相关 ====================
     ''' <summary>
-    ''' 把 README 里出现的旧版本号替换为新版本号，并刷新末尾生成时间
+    ''' 同步 README 里的版本号、更新日志日期、末尾生成时间、初始版本提示语
+    ''' 说明：不再依赖 oldVer 匹配，直接找第一条 ### 版本号并替换
     ''' </summary>
     Private Sub SyncReadmeVersion(oldVer As String, newVer As String)
-        If oldVer = "" OrElse newVer = "" Then Return
+        If newVer = "" Then Return
 
         Dim text = txtReadme.Text
         If String.IsNullOrEmpty(text) Then Return
-
-        ' ---- 1) 归一化：生成多个候选旧版本号 ----
-        Dim oldVariants As New List(Of String) From {oldVer}
-        Dim short3 = TrimTrailingZero(oldVer)
-        If short3 <> oldVer AndAlso short3 <> "" Then oldVariants.Add(short3)
-        Dim short2 = TrimTrailingZero(short3)
-        If short2 <> short3 AndAlso short2 <> "" Then oldVariants.Add(short2)
-
-        Dim newShow = newVer
-        Dim newShort3 = TrimTrailingZero(newVer)
-
-        ' ---- 2) 逐候选做正则替换 ----
         Dim original = text
 
-        For Each v In oldVariants
-            text = Regex.Replace(text,
-            "(#{2,6}\s*)v?" & Regex.Escape(v) & "(?=\s|\(|\r|\n|$)",
-            "${1}v" & newShow, RegexOptions.IgnoreCase)
+        ' 1) 替换第一条 ### vX.Y.Z 里的版本号
+        text = ReplaceFirstVersionInReadme(text, newVer)
 
-            text = Regex.Replace(text,
-            "(?<![\w\.])v?" & Regex.Escape(v) & "(?![\w\.])",
-            "v" & newShow, RegexOptions.IgnoreCase)
-        Next
-
-        ' ---- 3) 兜底：新版本号短形式 ----
-        If newShow <> newShort3 AndAlso newShort3 <> "" Then
-            text = Regex.Replace(text,
-            "(#{2,6}\s*)v?" & Regex.Escape(newShort3) & "(?=\s|\(|\r|\n|$)",
-            "${1}v" & newShow, RegexOptions.IgnoreCase)
-        End If
-
-        ' ---- 4) 刷新更新日志里的日期（### v2.3.6 (2026-09-23)） ----
+        ' 2) 刷新更新日志日期（仅当前新版本那一行）
         text = Regex.Replace(text,
-        "(###\s*v?" & Regex.Escape(newShow) & "\s*\()(\d{4}-\d{2}-\d{2})(\))",
-        "${1}" & DateTime.Now.ToString("yyyy-MM-dd") & "${3}",
-        RegexOptions.IgnoreCase)
+            "(###\s*v?" & Regex.Escape(newVer) & "\s*\()(\d{4}-\d{2}-\d{2})(\))",
+            "${1}" & DateTime.Now.ToString("yyyy-MM-dd") & "${3}",
+            RegexOptions.IgnoreCase)
 
-        ' ---- 5) 刷新末尾生成时间（_Generated by GitPushTool on ..._） ----
+        ' 3) 刷新末尾生成时间
         text = Regex.Replace(text,
-        "(_Generated by GitPushTool on )([^_\r\n]+)(_)",
-        "${1}" & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & "${3}",
-        RegexOptions.IgnoreCase)
+            "(_Generated by GitPushTool on )([^_\r\n]+)(_)",
+            "${1}" & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & "${3}",
+            RegexOptions.IgnoreCase)
 
-        ' ---- 6) 写回文本框 ----
+        ' 4) 更新"初始版本"提示语（如果不是 1.0.0 系列，改为"版本更新"）
+        text = UpdateInitialReleaseText(text, newVer)
+
         txtReadme.Text = text
 
-        ' ---- 7) 打印是否发生替换 ----
         If text = original Then
-            Log($"==> [版本号] README 中未找到任何与 {oldVer} 匹配的旧版本号，未替换")
+            Log("==> [版本号] README 中未找到需要替换的版本号")
         Else
-            Log($"==> [版本号] README 中的 {oldVer} 已同步为 {newVer}，并刷新时间")
+            Log($"==> [版本号] README 已同步为新版本 {newVer}")
         End If
     End Sub
 
-    ''' <summary>去掉版本号末尾的 .0（2.3.5.0 -> 2.3.5；2.3.5 -> 2.3）</summary>
+    ''' <summary>只替换 README 里出现的第一个更新日志版本号（保留历史记录）</summary>
+    Private Function ReplaceFirstVersionInReadme(text As String, newVer As String) As String
+        If String.IsNullOrEmpty(text) Then Return text
+        Dim pattern = "(#{2,6}\s*)v?(\d+\.\d+(?:\.\d+)?(?:\.\d+)?)(?=\s|\(|\r|\n|$)"
+        Dim replaced As Boolean = False
+        Dim updated = Regex.Replace(text, pattern,
+            Function(m)
+                If replaced Then Return m.Value
+                replaced = True
+                Return m.Groups(1).Value & "v" & newVer
+            End Function,
+            RegexOptions.IgnoreCase)
+        Return updated
+    End Function
+
+    ''' <summary>
+    ''' 更新"当前版本"标题行下的第一条 "- xxx" 提示语
+    ''' 若新版本是 1.0.0 系列，写"初始版本"；否则写"版本更新"
+    ''' </summary>
+    Private Function UpdateInitialReleaseText(text As String, newVer As String) As String
+        If String.IsNullOrEmpty(text) OrElse newVer = "" Then Return text
+
+        Dim isFirstRelease As Boolean = IsFirstReleaseVersion(newVer)
+        Dim newLine = If(isFirstRelease, "- 初始版本", "- 版本更新")
+
+        ' 找到 "### v<newVer> ..." 这一行，然后把紧随其后的第一个 "- xxx" 行替换
+        Dim pattern = "(###\s*v?" & Regex.Escape(newVer) & "[^\r\n]*\r?\n)" &
+                      "(\s*\r?\n)?" &
+                      "(\s*-\s*[^\r\n]*)"
+        Dim replacement = "${1}${2}" & newLine
+
+        Return Regex.Replace(text, pattern, replacement, RegexOptions.IgnoreCase)
+    End Function
+
+    ''' <summary>判断是否属于 "1.0.0" 初始版本系列（主 1 次 0 修订 0）</summary>
+    Private Function IsFirstReleaseVersion(v As String) As Boolean
+        If String.IsNullOrWhiteSpace(v) Then Return False
+        Dim parts = v.Split("."c)
+        If parts.Length < 3 Then Return False
+        If parts(0) <> "1" Then Return False
+        If parts(1) <> "0" Then Return False
+        If parts(2) <> "0" Then Return False
+        Return True
+    End Function
+
+    ''' <summary>去掉版本号末尾的 .0（2.3.5.0 -> 2.3.5；2.3.5 -> 2.3；至少保留两段）</summary>
     Private Function TrimTrailingZero(v As String) As String
         If String.IsNullOrWhiteSpace(v) Then Return v
         Dim parts = v.Split("."c).ToList()
-        ' 至少保留两段
         While parts.Count > 2 AndAlso parts(parts.Count - 1) = "0"
             parts.RemoveAt(parts.Count - 1)
         End While
@@ -812,7 +867,6 @@ Public Class MainForm
             Return Regex.Replace(xml, "(<" & tag & ">)(.*?)(</" & tag & ">)",
                                  "${1}" & value & "${3}", RegexOptions.IgnoreCase)
         End If
-        ' 插入到第一个 <PropertyGroup> 之后
         Dim m = Regex.Match(xml, "<PropertyGroup[^>]*>", RegexOptions.IgnoreCase)
         If m.Success Then
             Dim insertPos = m.Index + m.Length
@@ -877,8 +931,7 @@ Public Class MainForm
         ' README 单独写（不受 SaveConfig try 影响，便于报错定位）
         WriteReadmeToDisk()
     End Sub
-    Private lastProjectPath As String = ""   ' 上次成功加载的项目路径（用于写 README）
-    Private suppressProjectChanged As Boolean = False ' 抑制 txtProject 变更引起的重复加载
+
     ''' <summary>把文本框里的 README 写回上次加载的项目路径</summary>
     Private Sub WriteReadmeToDisk()
         Try
@@ -893,8 +946,9 @@ Public Class MainForm
         End Try
     End Sub
 
-    ''' <summary>窗体关闭时保存配置</summary>
+    ''' <summary>窗体关闭时保存配置和 README</summary>
     Private Sub MainForm_FormClosing(sender As Object, e As FormClosingEventArgs)
+        WriteReadmeToDisk()
         SaveConfig()
     End Sub
 
@@ -920,7 +974,7 @@ Public Class MainForm
         End If
         If commitMsg = "" Then commitMsg = "初始化提交"
 
-        ' 版本号一致性检查（可选增强）
+        ' 版本号一致性检查
         Dim projVer = ReadProjectVersion(projectPath)
         If projVer <> "" AndAlso projVer <> txtVersion.Text.Trim() Then
             Dim r = MessageBox.Show(
@@ -1037,14 +1091,11 @@ Public Class MainForm
                     txtTag.Text = tagName
                 End If
 
-                ' 先删除远程可能存在的所有历史 tag（同名或不同名）
                 Log("==> 清理远程历史 tag")
                 Await DeleteAllRemoteTagsAsync(gitExe, projectPath)
 
-                ' 删除本地同名 tag（如有）
                 Await RunGitAsync(gitExe, projectPath, $"tag -d ""{tagName}""", ignoreError:=True)
 
-                ' 重新打 tag
                 Log($"==> git tag {tagName}")
                 Await RunGitAsync(gitExe, projectPath, $"tag ""{tagName}""", ignoreError:=True)
             End If
@@ -1105,19 +1156,19 @@ Public Class MainForm
                        End Sub)
         Return result
     End Function
+
     ''' <summary>删除远程仓库里的所有 tag（逐个删除；本地保留）</summary>
     Private Async Function DeleteAllRemoteTagsAsync(gitExe As String, workDir As String) As Task
-        ' 1) 列出远程所有 tag
         Dim remoteTags As New List(Of String)
         Try
             Dim psi As New ProcessStartInfo() With {
-            .FileName = gitExe,
-            .Arguments = "ls-remote --tags origin",
-            .WorkingDirectory = workDir,
-            .RedirectStandardOutput = True,
-            .UseShellExecute = False,
-            .CreateNoWindow = True
-        }
+                .FileName = gitExe,
+                .Arguments = "ls-remote --tags origin",
+                .WorkingDirectory = workDir,
+                .RedirectStandardOutput = True,
+                .UseShellExecute = False,
+                .CreateNoWindow = True
+            }
             Dim output As String = ""
             Await Task.Run(Sub()
                                Using p As Process = Process.Start(psi)
@@ -1126,9 +1177,6 @@ Public Class MainForm
                                End Using
                            End Sub)
 
-            ' 输出示例：
-            '   3f2a1b...	refs/tags/v1.0.0
-            '   9d8e7c...	refs/tags/v1.0.0^{}
             For Each line In output.Split({ControlChars.Cr, ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries)
                 Dim parts = line.Split(ControlChars.Tab)
                 If parts.Length >= 2 Then
@@ -1143,13 +1191,11 @@ Public Class MainForm
             Log("    [tag] 列出远程 tag 失败：" & ex.Message)
         End Try
 
-        ' 2) 逐个删除远程 tag
         For Each t In remoteTags
             Log($"    删除远程 tag：{t}")
             Await RunGitAsync(gitExe, workDir, $"push origin :refs/tags/{t}", ignoreError:=True)
         Next
 
-        ' 3) 同步清理本地 tag（可选，避免本地堆积）
         For Each t In remoteTags
             Await RunGitAsync(gitExe, workDir, $"tag -d ""{t}""", ignoreError:=True)
         Next
@@ -1158,6 +1204,7 @@ Public Class MainForm
             Log("    没有需要清理的历史 tag")
         End If
     End Function
+
     ''' <summary>把 PAT 注入到 https 地址中</summary>
     Private Function InjectToken(repoUrl As String, user As String, token As String) As String
         If Not repoUrl.StartsWith("https://") Then Return repoUrl
