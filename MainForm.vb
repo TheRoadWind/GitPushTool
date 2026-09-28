@@ -537,22 +537,9 @@ Public Class MainForm
                 SyncReadmeVersion(oldVer, realVer)
             End If
 
-            ' 把同步后的 README 立刻写回磁盘
-            Dim readmePath = Path.Combine(projectPath, "README.md")
-            Try
-                If Not String.IsNullOrWhiteSpace(txtReadme.Text) Then
-                    File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
-                    Log("==> README.md 已写入磁盘")
-                Else
-                    Log("==> 文本框为空，跳过写 README.md")
-                End If
-            Catch ex As Exception
-                Log("==> 写 README.md 失败：" & ex.Message)
-                MessageBox.Show("写 README.md 失败：" & ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
-            End Try
-
             SaveConfig()
 
+            Dim readmePath = Path.Combine(projectPath, "README.md")
             ' 从磁盘重读
             If File.Exists(readmePath) Then
                 txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
@@ -909,6 +896,9 @@ Public Class MainForm
 
     ''' <summary>写入配置（不保存 README；README 在按钮和关闭时单独写）</summary>
     Private Sub SaveConfig()
+        '先保存 README 到磁盘，避免关闭时丢失
+        WriteReadmeToDisk()
+
         Try
             If Not Directory.Exists(configDir) Then Directory.CreateDirectory(configDir)
             Dim sb As New StringBuilder()
@@ -928,17 +918,18 @@ Public Class MainForm
             Log("保存配置失败：" & ex.Message)
         End Try
 
-        ' README 单独写（不受 SaveConfig try 影响，便于报错定位）
-        WriteReadmeToDisk()
     End Sub
 
     ''' <summary>把文本框里的 README 写回上次加载的项目路径</summary>
     Private Sub WriteReadmeToDisk()
+        Dim projectPath = txtProject.Text.Trim()
+        If projectPath = "" OrElse Not Directory.Exists(projectPath) Then
+            MessageBox.Show("请先选择有效的项目路径！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Return
+        End If
         Try
-            If lastProjectPath = "" OrElse Not Directory.Exists(lastProjectPath) Then Return
             If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
-
-            Dim readmePath = Path.Combine(lastProjectPath, "README.md")
+            Dim readmePath = Path.Combine(projectPath, "README.md")
             File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
             Log($"==> [README] 已写入 {readmePath}")
         Catch ex As Exception
@@ -948,7 +939,6 @@ Public Class MainForm
 
     ''' <summary>窗体关闭时保存配置和 README</summary>
     Private Sub MainForm_FormClosing(sender As Object, e As FormClosingEventArgs)
-        WriteReadmeToDisk()
         SaveConfig()
     End Sub
 
