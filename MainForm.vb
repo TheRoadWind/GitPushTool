@@ -538,15 +538,6 @@ Public Class MainForm
             End If
 
             SaveConfig()
-
-            Dim readmePath = Path.Combine(projectPath, "README.md")
-            ' 从磁盘重读
-            If File.Exists(readmePath) Then
-                txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
-            Else
-                txtReadme.Text = DefaultReadme(New DirectoryInfo(projectPath).Name)
-            End If
-
             MessageBox.Show($"版本号已升级到：{realVer}" & vbCrLf & "README 已同步。",
                             "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
         Finally
@@ -927,11 +918,16 @@ Public Class MainForm
             MessageBox.Show("请先选择有效的项目路径！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
             Return
         End If
+
+        If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
+        Dim readmePath = Path.Combine(projectPath, "README.md")
+
         Try
-            If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
-            Dim readmePath = Path.Combine(projectPath, "README.md")
             File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
             Log($"==> [README] 已写入 {readmePath}")
+
+            ' 重新读取，确保编码和换行一致
+            txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
         Catch ex As Exception
             Log("==> [README] 写入失败：" & ex.Message)
         End Try
