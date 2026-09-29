@@ -67,7 +67,6 @@ Public Class MainForm
     Private currentUser As String = ""        ' 当前 GitHub 用户名
     Private currentGit As String = ""         ' 当前 git.exe 完整路径
     Private allRepos As New List(Of RepoInfo)() ' 当前账号下所有仓库
-    Private lastProjectPath As String = ""    ' 上次成功加载的项目路径（用于写 README）
     Private suppressProjectChanged As Boolean = False ' 抑制 txtProject 变更引起的重复加载
 
     ' 配置文件目录与路径：C:\Users\Administrator\AppData\Roaming\GitPushTool
@@ -287,6 +286,9 @@ Public Class MainForm
         }
         Me.Controls.Add(txtLog)
 
+        '设置控件启用状态
+        SetControlsEnabled(False)
+
         ' ========== 事件绑定 ==========
         AddHandler btnBrowse.Click, AddressOf btnBrowse_Click
         AddHandler chkTag.CheckedChanged, Sub()
@@ -320,6 +322,13 @@ Public Class MainForm
             AddHandler c.DragDrop, AddressOf MainForm_DragDrop
             If c.HasChildren Then EnableDragDropRecursive(c)
         Next
+    End Sub
+    '设置统一的控件是否启用（升级按钮、版本号、打tag、推送）
+    Private Sub SetControlsEnabled(enabled As Boolean)
+        txtVersion.Enabled = enabled
+        btnUpgradeVersion.Enabled = enabled
+        chkTag.Enabled = enabled
+        btnPush.Enabled = enabled
     End Sub
 
     ' ==================== 窗体首次显示 ====================
@@ -449,10 +458,15 @@ Public Class MainForm
             Dim name = New DirectoryInfo(dir).Name
             If name <> "" Then
                 txtRepo.Text = $"https://github.com/{currentUser}/{name}.git"
+                '启用版本号编辑\升级按钮\打tag
+                SetControlsEnabled(True)
+            Else
+                SetControlsEnabled(False)
+                MessageBox.Show("无法获取项目文件夹名称，请检查路径是否正确。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                Return
             End If
 
-            ' 记录有效路径
-            lastProjectPath = dir
+
 
             ' 自动读取 .vbproj 版本号
             Dim v = ReadProjectVersion(dir)
@@ -886,7 +900,12 @@ Public Class MainForm
     End Sub
 
     ''' <summary>写入配置（不保存 README；README 在按钮和关闭时单独写）</summary>
-    Private Sub SaveConfig()
+    Private Sub SaveConfig(Optional IsFormClosed As Boolean = False)
+        '如果是窗体关闭时且工程路径为空，则不保存配置，避免覆盖之前的有效配置
+        If IsFormClosed AndAlso String.IsNullOrWhiteSpace(txtProject.Text) Then
+            Return
+        End If
+
         '先保存 README 到磁盘，避免关闭时丢失
         WriteReadmeToDisk()
 
@@ -935,7 +954,7 @@ Public Class MainForm
 
     ''' <summary>窗体关闭时保存配置和 README</summary>
     Private Sub MainForm_FormClosing(sender As Object, e As FormClosingEventArgs)
-        SaveConfig()
+        SaveConfig(IsFormClosed:=True)
     End Sub
 
     ' ==================== 推送主流程 ====================
