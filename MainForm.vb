@@ -1,6 +1,8 @@
 ﻿Imports System.Diagnostics
 Imports System.Drawing
+Imports System.Drawing.Imaging
 Imports System.IO
+Imports System.IO.Compression
 Imports System.Net.Http
 Imports System.Net.Http.Headers
 Imports System.Text
@@ -685,6 +687,8 @@ Public Class MainForm
     ''' 统一整理 README 面板内容：
     ''' 1) 立即把 {项目名}/{用户名} 占位符替换为真实值（不再等到推送时才替换）
     ''' 2) 把"目录结构"小节刷新为当前项目的真实目录树
+    ''' 3) 把"环境要求"小节的运行时同步为项目实际技术栈
+    ''' 4) 自动导入项目图标并在 README 顶部显示（ico 会转成 PNG，GitHub 才能渲染）
     ''' </summary>
     Private Sub NormalizeReadme(projectDir As String, projName As String)
         If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
@@ -694,6 +698,12 @@ Public Class MainForm
 
         ' 2) 目录结构刷新（以当前项目实际目录为准）
         UpdateReadmeDirectoryTree(projectDir)
+
+        ' 3) 环境要求里的运行时同步（自动识别 .NET / Node / Python / Java / Android 等）
+        UpdateReadmeEnvironment(projectDir)
+
+        ' 4) 应用图标：导入到 docs/ 并在 README 顶部插图
+        UpdateReadmeIcon(projectDir)
     End Sub
 
     ''' <summary>
@@ -740,7 +750,9 @@ Public Class MainForm
             If Regex.IsMatch(lines(i), "^#{1,6}\s") Then Exit For
         Next
 
-        Dim treeLines = New List(Of String)(tree.Split(vbLf))
+        ' 目录树由 StringBuilder.AppendLine 生成（换行符是 vbCrLf），
+        ' 必须先统一成 vbLf 再拆分，否则每行末尾残留 "\r" 会让 README 里多出空行
+        Dim treeLines = New List(Of String)(tree.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(vbLf))
         If fenceOpen >= 0 Then
             ' 找闭合围栏
             Dim fenceClose = -1
@@ -827,6 +839,580 @@ Public Class MainForm
             End If
         Catch
             ' 单个目录读取失败跳过即可
+        End Try
+    End Sub
+
+    ' ==================== README 环境要求（运行时）自动同步 ====================
+    ''' <summary>
+    ''' 探测项目运行时 / 技术栈，并同步到 README 的"环境要求"小节
+    ''' 支持：.NET、Node.js、Python、Java、Android、Flutter、Go、Rust、PHP 等
+    ''' </summary>
+    Private Sub UpdateReadmeEnvironment(projectDir As String)
+        Dim osText As String = ""
+        Dim runtime = DetectRuntime(projectDir, osText)
+        ' 探测不到任何技术栈时不改动 README，避免误覆盖用户手写内容
+        If String.IsNullOrWhiteSpace(runtime) Then Return
+
+        ' 统一换行符后按行处理
+        Dim lines = New List(Of String)(txtReadme.Text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(vbLf))
+
+        ' 定位 "## 🛠️ 环境要求" 标题
+        Dim headIdx = -1
+        For i = 0 To lines.Count - 1
+            If Regex.IsMatch(lines(i), "^#{1,6}\s*.*环境要求") Then
+                headIdx = i
+                Exit For
+            End If
+        Next
+
+        If headIdx < 0 Then
+            ' 没有小节：插到"更新日志"/"目录结构"/"快速开始"之前，都找不到就追加到末尾
+            Dim insertAt = lines.Count
+            For Each kw In New String() {"更新日志", "目录结构", "快速开始"}
+                For i = 0 To lines.Count - 1
+                    If Regex.IsMatch(lines(i), "^#{1,6}\s*.*" & kw) Then
+                        insertAt = i
+                        Exit For
+                    End If
+                Next
+                If insertAt < lines.Count Then Exit For
+            Next
+            lines.InsertRange(insertAt, New String() {"## 🛠️ 环境要求", "", ""})
+            headIdx = insertAt
+        End If
+
+        ' 小节范围：从标题下一行到下一个标题之前
+        Dim endIdx = lines.Count
+        For i = headIdx + 1 To lines.Count - 1
+            If Regex.IsMatch(lines(i), "^#{1,6}\s") Then
+                endIdx = i
+                Exit For
+            End If
+        Next
+
+        ' 1) 运行时行：已存在则替换，不存在则追加到小节末尾
+        Dim runtimeLine = "- 运行时：" & runtime
+        If Not ReplaceSectionLine(lines, headIdx, endIdx, "运行时", runtimeLine) Then
+            AppendLineToSection(lines, headIdx, endIdx, runtimeLine)
+        End If
+
+        ' 2) 操作系统行：仅在能推断出操作系统、且原行还是模板默认值时才替换
+        If osText <> "" Then
+            ReplaceSectionLine(lines, headIdx, endIdx, "操作系统",
+                               "- 操作系统：" & osText, onlyIfContains:="Windows 10 / 11")
+        End If
+
+        txtReadme.Text = String.Join(vbCrLf, lines)
+    End Sub
+
+    ''' <summary>
+    ''' 探测项目运行时 / 技术栈；osText 返回可推断的操作系统描述
+    ''' 探测顺序：.NET 工程 → Node → Python → Java/Maven → Gradle/Android → Flutter → Go → Rust → PHP → apk 兜底
+    ''' </summary>
+    Private Function DetectRuntime(projectDir As String, ByRef osText As String) As String
+        osText = ""
+        Try
+            If String.IsNullOrWhiteSpace(projectDir) OrElse Not Directory.Exists(projectDir) Then Return ""
+            Dim v As String = ""
+
+            ' 1) .NET：优先读 TargetFramework / TargetFrameworks（如 net10.0-windows）
+            For Each ext In New String() {"*.vbproj", "*.csproj", "*.fsproj"}
+                Dim files = Directory.GetFiles(projectDir, ext, SearchOption.TopDirectoryOnly)
+                If files.Length = 0 Then Continue For
+                Dim content = File.ReadAllText(files(0), Encoding.UTF8)
+                Dim tfm = GetXmlTagValue(content, "TargetFramework")
+                If tfm = "" Then tfm = GetXmlTagValue(content, "TargetFrameworks")
+                If tfm <> "" Then Return ParseDotNetTfm(tfm, osText)
+            Next
+
+            ' 2) Node.js：package.json 的 engines.node（没写就只标 Node.js）
+            v = FirstMatchInFile(projectDir, "package.json", """node""\s*:\s*""([^""]+)""")
+            If v <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Node.js " & v
+            End If
+            Dim hasPkg = FindFile(projectDir, "package.json")
+            If hasPkg <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Node.js"
+            End If
+
+            ' 3) Python：pyproject.toml 的 requires-python / setup.py 的 python_requires
+            v = FirstMatchInFile(projectDir, "pyproject.toml", "requires-python\s*=\s*[""']([^""']+)[""']")
+            If v = "" Then v = FirstMatchInFile(projectDir, "setup.py", "python_requires\s*=\s*['""]([^'""]+)['""]")
+            If v <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Python " & v
+            End If
+            ' 有 requirements.txt / setup.py 但没有版本约束时，只标 Python
+            If FindFile(projectDir, "requirements.txt") <> "" OrElse FindFile(projectDir, "setup.py") <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Python"
+            End If
+
+            ' 4) Java / Maven：pom.xml 的 java.version 或 maven.compiler.source
+            v = FirstMatchInFile(projectDir, "pom.xml", "<java\.version>([^<>]+)</java\.version>")
+            If v = "" Then v = FirstMatchInFile(projectDir, "pom.xml", "<maven\.compiler\.source>([^<>]+)</maven\.compiler\.source>")
+            If v <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Java " & v
+            End If
+            If FindFile(projectDir, "pom.xml") <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Java（Maven）"
+            End If
+
+            ' 5) Gradle / Android：compileSdk、minSdk、sourceCompatibility
+            Dim compileSdk = FirstMatchInFile(projectDir, "build.gradle", "compileSdk(?:Version)?\s*[= ]\s*['""]?(\d+)['""]?")
+            If compileSdk = "" Then compileSdk = FirstMatchInFile(projectDir, "build.gradle.kts", "compileSdk\s*=\s*(\d+)")
+            Dim minSdk = FirstMatchInFile(projectDir, "build.gradle", "minSdk(?:Version)?\s*[= ]\s*['""]?(\d+)['""]?")
+            If minSdk = "" Then minSdk = FirstMatchInFile(projectDir, "build.gradle.kts", "minSdk\s*=\s*(\d+)")
+            Dim jvm = FirstMatchInFile(projectDir, "build.gradle", "sourceCompatibility\s*[= ]\s*['""]([^'""]+)['""]")
+            If jvm = "" Then jvm = FirstMatchInFile(projectDir, "build.gradle.kts", "sourceCompatibility\s*=\s*.*?(\d+)")
+            If compileSdk <> "" OrElse minSdk <> "" Then
+                osText = "Android"
+                Dim r = "Android（compileSdk " & If(compileSdk <> "", compileSdk, "-") &
+                        "，minSdk " & If(minSdk <> "", minSdk, "-") & "）"
+                Return r
+            End If
+            If FindFile(projectDir, "build.gradle") <> "" OrElse FindFile(projectDir, "build.gradle.kts") <> "" Then
+                osText = "Windows / Linux / macOS"
+                If jvm <> "" Then Return "Java " & jvm & "（Gradle）"
+                Return "Java（Gradle）"
+            End If
+
+            ' 6) Flutter / Dart：pubspec.yaml 的 environment.sdk
+            v = FirstMatchInFile(projectDir, "pubspec.yaml", "(?m)^\s*sdk\s*:\s*['""]?([^\r\n]+)['""]?")
+            If v <> "" Then
+                osText = "Android / iOS / Windows / macOS"
+                Return "Flutter（Dart SDK " & v.Trim() & "）"
+            End If
+
+            ' 7) Go：go.mod 的 go 1.xx
+            v = FirstMatchInFile(projectDir, "go.mod", "(?m)^\s*go\s+(\d+\.\d+(?:\.\d+)?)")
+            If v <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Go " & v
+            End If
+
+            ' 8) Rust：rust-toolchain 的 channel 或 Cargo.toml 的 edition
+            v = FirstMatchInFile(projectDir, "rust-toolchain.toml", "channel\s*=\s*[""']([^""']+)[""']")
+            If v = "" Then v = FirstMatchInFile(projectDir, "rust-toolchain", "([^\r\n]+)")
+            Dim edition = FirstMatchInFile(projectDir, "Cargo.toml", "(?m)^\s*edition\s*=\s*""([^""]+)""")
+            If v <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Rust（" & v & If(edition <> "", "，edition " & edition, "") & "）"
+            End If
+            If edition <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "Rust（edition " & edition & "）"
+            End If
+
+            ' 9) PHP：composer.json 的 php 约束
+            v = FirstMatchInFile(projectDir, "composer.json", """php""\s*:\s*""([^""]+)""")
+            If v <> "" Then
+                osText = "Windows / Linux / macOS"
+                Return "PHP " & v
+            End If
+
+            ' 10) 兜底：只有 apk/aab 时按 Android 处理
+            Dim pkg = FindLatestFile(projectDir, New String() {"*.apk", "*.aab"}, allowBuildDirs:=True)
+            If pkg <> "" Then
+                osText = "Android"
+                Return "Android"
+            End If
+
+        Catch
+            ' 探测失败不改动 README
+        End Try
+        Return ""
+    End Function
+
+    ''' <summary>把 TargetFramework(s) 解析成易读的运行时名与操作系统描述</summary>
+    Private Function ParseDotNetTfm(tfmList As String, ByRef osText As String) As String
+        Dim parts = tfmList.Split(";"c).Select(Function(s) s.Trim()).Where(Function(s) s <> "").ToList()
+        Dim names As New List(Of String)()
+        Dim platforms As New List(Of String)()
+
+        For Each p In parts
+            Dim lower = p.ToLowerInvariant()
+            ' 平台后缀：-windows、-android、-ios、-macos、-linux、-browser 等
+            Dim dash = lower.IndexOf("-"c)
+            Dim platform = If(dash > 0, lower.Substring(dash + 1), "")
+            Dim baseTfm = If(dash > 0, lower.Substring(0, dash), lower)
+            Dim name = MapDotNetTfm(baseTfm)
+            If Not names.Contains(name) Then names.Add(name)
+            If platform <> "" AndAlso Not platforms.Contains(platform) Then platforms.Add(platform)
+        Next
+
+        ' 由平台后缀推断适用操作系统
+        If platforms.Contains("windows") Then
+            osText = "Windows 10 / 11"
+        ElseIf platforms.Contains("android") Then
+            osText = "Android"
+        ElseIf platforms.Contains("ios") OrElse platforms.Contains("maccatalyst") Then
+            osText = "iOS"
+        ElseIf platforms.Contains("macos") Then
+            osText = "macOS"
+        ElseIf platforms.Contains("linux") Then
+            osText = "Linux"
+        ElseIf platforms.Count = 0 Then
+            ' 不带平台后缀（如 net8.0）表示跨平台
+            osText = "Windows / Linux / macOS"
+        End If
+
+        Dim runtime = String.Join(" / ", names)
+        If platforms.Count > 0 Then
+            runtime &= "（" & String.Join("、", platforms.Select(AddressOf MapPlatformName)) & "）"
+        End If
+        Return runtime
+    End Function
+
+    ''' <summary>把 TFM 的基础部分映射为易读名称（net10.0 → .NET 10.0；net48 → .NET Framework 4.8）</summary>
+    Private Function MapDotNetTfm(tfm As String) As String
+        ' net8.0 / net10.0 等新式 TFM
+        Dim m = Regex.Match(tfm, "^net(\d+)\.(\d+)$")
+        If m.Success Then Return ".NET " & m.Groups(1).Value & "." & m.Groups(2).Value
+        ' net48 / net472 等 .NET Framework（第二位是次版本，其余为修订号）
+        m = Regex.Match(tfm, "^net(\d)(\d{1,2})$")
+        If m.Success Then
+            Dim major = m.Groups(1).Value
+            Dim minor = m.Groups(2).Value
+            If minor.Length = 1 Then Return ".NET Framework " & major & "." & minor
+            Return ".NET Framework " & major & "." & minor(0) & "." & minor.Substring(1)
+        End If
+        ' netstandard2.0 / netcoreapp3.1
+        m = Regex.Match(tfm, "^netstandard(\d+\.\d+)$")
+        If m.Success Then Return ".NET Standard " & m.Groups(1).Value
+        m = Regex.Match(tfm, "^netcoreapp(\d+\.\d+)$")
+        If m.Success Then Return ".NET Core " & m.Groups(1).Value
+        Return tfm
+    End Function
+
+    ''' <summary>把 TFM 平台后缀映射为易读名称</summary>
+    Private Function MapPlatformName(platform As String) As String
+        Select Case platform.ToLowerInvariant()
+            Case "windows" : Return "Windows"
+            Case "android" : Return "Android"
+            Case "ios" : Return "iOS"
+            Case "macos" : Return "macOS"
+            Case "maccatalyst" : Return "Mac Catalyst"
+            Case "linux" : Return "Linux"
+            Case "browser" : Return "WebAssembly"
+            Case "tvos" : Return "tvOS"
+            Case Else : Return platform
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' 在指定小节内替换以 "- key" 开头的行；返回是否替换成功
+    ''' onlyIfContains 非空时，只有当原行包含该文本才替换（避免覆盖用户自定义内容）
+    ''' </summary>
+    Private Function ReplaceSectionLine(lines As List(Of String), startIdx As Integer, endIdx As Integer,
+                                        key As String, newLine As String, Optional onlyIfContains As String = "") As Boolean
+        For i = startIdx + 1 To endIdx - 1
+            If Regex.IsMatch(lines(i), "^\s*-\s*" & key & "\s*[:：]?") Then
+                If onlyIfContains <> "" AndAlso Not lines(i).Contains(onlyIfContains) Then Return False
+                lines(i) = newLine
+                Return True
+            End If
+        Next
+        Return False
+    End Function
+
+    ''' <summary>在指定小节末尾追加一行（跳过小节尾部的空行）</summary>
+    Private Sub AppendLineToSection(lines As List(Of String), startIdx As Integer, endIdx As Integer, newLine As String)
+        Dim lastContent = startIdx        ' 小节内最后一个非空行的位置
+        For i = startIdx + 1 To endIdx - 1
+            If lines(i).Trim() <> "" Then lastContent = i
+        Next
+        If lastContent = startIdx Then
+            ' 小节是空的：标题下插入空行 + 内容 + 空行
+            lines.InsertRange(startIdx + 1, New String() {"", newLine, ""})
+        Else
+            lines.Insert(lastContent + 1, newLine)
+        End If
+    End Sub
+
+    ' ==================== README 应用图标自动导入 ====================
+    ''' <summary>
+    ''' 自动把项目图标导入项目目录（统一放到 docs/ 下，ico 会转成 PNG），
+    ''' 并在 README 顶部插入图片引用，这样 GitHub 仓库页面就能直接看到程序图标
+    ''' 说明：GitHub 不渲染 .ico，所以 ico 必须先转成 png
+    ''' </summary>
+    Private Sub UpdateReadmeIcon(projectDir As String)
+        Try
+            ' 1) 找图标：本地图片/图标文件优先，找不到再从 apk 里提取
+            Dim relPath As String = ""
+            Dim src = FindProjectIcon(projectDir)
+            If src <> "" Then
+                relPath = ImportProjectIcon(projectDir, src)
+            Else
+                relPath = TryExtractApkIcon(projectDir)
+            End If
+            If relPath = "" Then Exit Sub
+
+            ' 2) 在 README 顶部插入或更新图标引用（幂等，不会重复插入）
+            UpsertReadmeIconLine(relPath)
+
+            ' 3) 提示 .gitignore 可能会把图标排除掉
+            CheckIconIgnored(projectDir, relPath)
+        Catch ex As Exception
+            Log("==> [图标] 处理失败：" & ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>查找项目图标文件：先在常见资源目录按常见文件名找，再退而取目录里第一张图片</summary>
+    Private Function FindProjectIcon(projectDir As String) As String
+        Try
+            ' 常见图标文件名（不区分大小写，File.Exists 在 Windows 上天然不区分）
+            Dim names = New String() {
+                "icon.png", "app.png", "logo.png", "appicon.png", "favicon.png",
+                "icon.jpg", "logo.jpg",
+                "icon.svg", "logo.svg",
+                "icon.ico", "app.ico", "favicon.ico", "logo.ico"
+            }
+            ' 常见资源目录（"" 表示项目根目录）
+            Dim dirs = New String() {"", "docs", "images", "img", "assets", "res", "Resources", "public", "static", "icons"}
+
+            ' 第一轮：按明确文件名逐个匹配
+            For Each d In dirs
+                For Each n In names
+                    Dim p = If(d = "", Path.Combine(projectDir, n), Path.Combine(projectDir, d, n))
+                    If File.Exists(p) Then Return p
+                Next
+            Next
+
+            ' 第二轮：在资源目录里取第一张图片（任意文件名）
+            For Each d In dirs
+                If d = "" Then Continue For
+                Dim dd = Path.Combine(projectDir, d)
+                If Not Directory.Exists(dd) Then Continue For
+                For Each pat In New String() {"*.png", "*.jpg", "*.jpeg", "*.svg", "*.ico"}
+                    Dim files = Directory.GetFiles(dd, pat, SearchOption.TopDirectoryOnly)
+                    If files.Length > 0 Then Return files(0)
+                Next
+            Next
+
+            ' 第三轮：Android 启动器图标（ic_launcher.png，位于 res\mipmap-* 下）
+            Dim androidIcon = FindFile(projectDir, "ic_launcher.png")
+            If androidIcon <> "" Then Return androidIcon
+        Catch
+        End Try
+        Return ""
+    End Function
+
+    ''' <summary>
+    ''' 把图标导入到项目的 docs 目录，返回相对 README 的路径（如 docs/icon.png）
+    ''' ico 会被转成 256×256 的 PNG（GitHub 不渲染 .ico）；png/jpg/svg 直接复制
+    ''' 目标文件已存在且不比源文件旧时跳过，保证重复调用幂等
+    ''' </summary>
+    Private Function ImportProjectIcon(projectDir As String, srcPath As String) As String
+        Try
+            Dim ext = Path.GetExtension(srcPath).ToLowerInvariant()
+            If ext <> ".ico" AndAlso ext <> ".png" AndAlso ext <> ".jpg" AndAlso
+               ext <> ".jpeg" AndAlso ext <> ".svg" Then Return ""
+
+            ' ico 统一转成 png；其它格式保留原扩展名
+            Dim destName = If(ext = ".ico", "icon.png", "icon" & ext)
+            Dim destDir = Path.Combine(projectDir, "docs")
+            Dim destPath = Path.Combine(destDir, destName)
+
+            ' 已经导入过且图标没有更新 → 直接返回，避免重复写盘
+            If File.Exists(destPath) AndAlso
+               File.GetLastWriteTime(destPath) >= File.GetLastWriteTime(srcPath) Then
+                Return "docs/" & destName
+            End If
+
+            If Not Directory.Exists(destDir) Then Directory.CreateDirectory(destDir)
+
+            If ext = ".ico" Then
+                ' ICO → PNG（GitHub 不渲染 ico）
+                If Not ConvertIcoToPng(srcPath, destPath) Then Return ""
+                Log("==> [图标] 已由 " & Path.GetFileName(srcPath) & " 生成 docs/icon.png")
+            Else
+                File.Copy(srcPath, destPath, True)
+                Log("==> [图标] 已导入 docs/" & destName)
+            End If
+
+            Return "docs/" & destName
+        Catch ex As Exception
+            Log("==> [图标] 导入失败：" & ex.Message)
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' 把 ico 转成 png。
+    ''' 优先直接解析 ico 文件结构、取出最大的一帧：若该帧本身就是 PNG（Vista 风格 ico 常见），
+    ''' 原样写出即可做到无损；否则（老式 BMP 帧）再用 GDI+ 渲染成 256×256。
+    ''' 说明：内嵌 PNG 帧的 ico 用 Icon.ToBitmap() 会抛 "Requested range extends past the end of the array"，
+    ''' 所以必须先走取帧这条路
+    ''' </summary>
+    Private Function ConvertIcoToPng(srcPath As String, destPath As String) As Boolean
+        ' ---- 方式一：直接解析 ICO 结构取帧 ----
+        Try
+            Dim data = File.ReadAllBytes(srcPath)
+            ' ICO 头：保留字(2) + 类型(2) + 帧数(2)，其后每帧 16 字节目录项
+            If data.Length > 6 AndAlso BitConverter.ToUInt16(data, 2) = 1 Then
+                Dim count = BitConverter.ToUInt16(data, 4)
+                Dim bestSize = -1, bestOffset = 0, bestLen = 0
+                For i = 0 To count - 1
+                    Dim p = 6 + i * 16
+                    If p + 16 > data.Length Then Exit For
+                    Dim w = CInt(data(p)) : If w = 0 Then w = 256   ' 目录项里 0 表示 256
+                    Dim len = CInt(BitConverter.ToUInt32(data, p + 8))
+                    Dim off = CInt(BitConverter.ToUInt32(data, p + 12))
+                    If w > bestSize AndAlso off >= 0 AndAlso len > 0 AndAlso off + len <= data.Length Then
+                        bestSize = w : bestOffset = off : bestLen = len
+                    End If
+                Next
+                ' PNG 帧以 0x89 'P' 'N' 'G' 开头 → 直接写出，画质无损
+                If bestLen > 8 AndAlso data(bestOffset) = &H89 AndAlso data(bestOffset + 1) = &H50 AndAlso
+                   data(bestOffset + 2) = &H4E AndAlso data(bestOffset + 3) = &H47 Then
+                    File.WriteAllBytes(destPath, data.Skip(bestOffset).Take(bestLen).ToArray())
+                    Return True
+                End If
+            End If
+        Catch
+            ' 解析失败则回退到 GDI+ 方式
+        End Try
+
+        ' ---- 方式二：老式 BMP 帧，用 GDI+ 渲染 ----
+        Try
+            Dim ico As Icon = Nothing
+            Try
+                ico = New Icon(srcPath, New Size(256, 256))   ' 多尺寸 ico 取最接近 256 的一帧
+            Catch
+                ico = New Icon(srcPath)                       ' 兜底：用默认尺寸
+            End Try
+            Using ico
+                Using srcBmp = ico.ToBitmap()
+                    Using bmp As New Bitmap(256, 256)
+                        Using g = Graphics.FromImage(bmp)
+                            g.InterpolationMode = Drawing2D.InterpolationMode.HighQualityBicubic
+                            g.SmoothingMode = Drawing2D.SmoothingMode.HighQuality
+                            g.Clear(Color.Transparent)
+                            g.DrawImage(srcBmp, 0, 0, 256, 256)
+                        End Using
+                        bmp.Save(destPath, ImageFormat.Png)
+                    End Using
+                End Using
+            End Using
+            Return True
+        Catch ex As Exception
+            Log("==> [图标] ICO 转换失败：" & ex.Message)
+        End Try
+        Return False
+    End Function
+
+    ''' <summary>从 apk 里提取应用图标（aapt 查询图标路径 + 解压 apk），返回相对 README 的路径</summary>
+    Private Function TryExtractApkIcon(projectDir As String) As String
+        Try
+            ' 项目里没有图标文件时，才尝试从 apk 包中提取
+            Dim apk = FindLatestFile(projectDir, New String() {"*.apk"}, allowBuildDirs:=True)
+            If apk = "" Then Return ""
+            Dim aapt = FindAapt()
+            If aapt = "" Then Return ""
+
+            ' aapt dump badging 的输出里含 application-icon-480:'res/xxx.png' 这类条目，取分辨率最高的
+            Dim output As String = ""
+            Dim psi As New ProcessStartInfo() With {
+                .FileName = aapt,
+                .Arguments = $"dump badging ""{apk}""",
+                .RedirectStandardOutput = True,
+                .UseShellExecute = False,
+                .CreateNoWindow = True,
+                .StandardOutputEncoding = Encoding.UTF8
+            }
+            Using p As Process = Process.Start(psi)
+                output = p.StandardOutput.ReadToEnd()
+                p.WaitForExit()
+            End Using
+
+            Dim bestRes = -1
+            Dim bestEntry As String = ""
+            For Each m As Match In Regex.Matches(output, "application-icon-(\d+):'([^']+)'")
+                Dim res As Integer
+                If Integer.TryParse(m.Groups(1).Value, res) AndAlso res > bestRes Then
+                    bestRes = res
+                    bestEntry = m.Groups(2).Value
+                End If
+            Next
+            If bestEntry = "" Then Return ""
+
+            Dim destDir = Path.Combine(projectDir, "docs")
+            If Not Directory.Exists(destDir) Then Directory.CreateDirectory(destDir)
+            Dim destPath = Path.Combine(destDir, "icon.png")
+
+            ' 直接从 apk（zip）里读出该图标条目并存为 PNG
+            Using zip = ZipFile.OpenRead(apk)
+                Dim entry = zip.GetEntry(bestEntry)
+                If entry Is Nothing Then Return ""
+                Using s = entry.Open()
+                    Using bmp As New Bitmap(s)
+                        bmp.Save(destPath, ImageFormat.Png)
+                    End Using
+                End Using
+            End Using
+
+            Log("==> [图标] 已从 " & Path.GetFileName(apk) & " 提取图标 docs/icon.png")
+            Return "docs/icon.png"
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>在 README 第一个一级标题后插入或更新应用图标引用（避免重复插入）</summary>
+    Private Sub UpsertReadmeIconLine(relPath As String)
+        If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
+        Dim lines = New List(Of String)(txtReadme.Text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(vbLf))
+        Dim imgLine = $"<img src=""{relPath}"" width=""120"" alt=""应用图标"" />"
+
+        ' 已存在本工具插入的图标行（按 alt="应用图标" 识别）→ 更新路径即可
+        For i = 0 To lines.Count - 1
+            If lines(i).Contains("alt=""应用图标""") Then
+                If lines(i) = imgLine Then Return
+                lines(i) = imgLine
+                txtReadme.Text = String.Join(vbCrLf, lines)
+                Return
+            End If
+        Next
+
+        ' 用户自己已经引用过同一张图片 → 不重复插入
+        For i = 0 To lines.Count - 1
+            If lines(i).Contains(relPath) Then Return
+        Next
+
+        ' 插到第一个 # 标题之后
+        Dim titleIdx = -1
+        For i = 0 To lines.Count - 1
+            If Regex.IsMatch(lines(i), "^#\s") Then
+                titleIdx = i
+                Exit For
+            End If
+        Next
+        lines.InsertRange(If(titleIdx >= 0, titleIdx + 1, 0), New String() {"", imgLine})
+        txtReadme.Text = String.Join(vbCrLf, lines)
+        Log("==> [图标] README 顶部已插入应用图标")
+    End Sub
+
+    ''' <summary>检查 .gitignore 是否会忽略刚导入的图标，会的话给出警告</summary>
+    Private Sub CheckIconIgnored(projectDir As String, relPath As String)
+        Try
+            Dim gi = Path.Combine(projectDir, ".gitignore")
+            If Not File.Exists(gi) Then Return
+            Dim ext = Path.GetExtension(relPath).ToLowerInvariant()
+            For Each line In File.ReadAllLines(gi, Encoding.UTF8)
+                Dim t = line.Trim()
+                If t = "" OrElse t.StartsWith("#") Then Continue For
+                ' 命中 "*<扩展名>"、"docs/"、"docs/*" 这类规则时图标不会被提交
+                If t = "*" & ext OrElse t = "docs/" OrElse t = "docs/*" Then
+                    Log("==> [警告] .gitignore 里的 """ & t & """ 会忽略 " & relPath & "，GitHub 上将看不到图标")
+                    Return
+                End If
+            Next
+        Catch
         End Try
     End Sub
 
