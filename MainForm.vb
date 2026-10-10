@@ -30,10 +30,10 @@ Public Class MainForm
     Private lblMsg As Label              ' 提交信息标签
     Private txtMsg As TextBox            ' 提交信息输入框
     Private lblVersion As Label          ' 版本号标签
-    Private txtVersion As TextBox        ' 版本号输入框（写入 .vbproj）
+    Private txtVersion As TextBox        ' 版本号输入框（只读：自动从工程文件 / exe / apk 等探测，禁止手工修改）
+    Private lblVersionInfo As Label      ' 版本号来源提示（例如来自某个 exe / apk / 工程文件）
     Private chkTag As CheckBox           ' 是否打 tag
     Private txtTag As TextBox            ' tag 名称
-    Private btnUpgradeVersion As Button  ' 确认升级按钮
     Private chkInit As CheckBox          ' 自动 git init
     Private chkIgnore As CheckBox        ' 生成 .gitignore
     Private chkReadme As CheckBox        ' 生成 README.md
@@ -68,6 +68,13 @@ Public Class MainForm
     Private currentGit As String = ""         ' 当前 git.exe 完整路径
     Private allRepos As New List(Of RepoInfo)() ' 当前账号下所有仓库
     Private suppressProjectChanged As Boolean = False ' 抑制 txtProject 变更引起的重复加载
+    Private versionSourceText As String = ""          ' 最近一次版本号探测的来源说明（用于界面展示）
+
+    ' 工程文件与编译产物里都探测不到版本号时使用的初始版本号
+    Private Const InitialVersion As String = "1.0.0.0"
+
+    ' 生成 README 目录结构时每层最多列出的条目数（防止 README 过长）
+    Private Const MaxTreeEntriesPerLevel As Integer = 12
 
     ' 配置文件目录与路径：C:\Users\Administrator\AppData\Roaming\GitPushTool
     Private ReadOnly configDir As String =
@@ -98,6 +105,15 @@ Public Class MainForm
         Me.AllowDrop = True
         Me.StartPosition = FormStartPosition.CenterScreen
         Me.MinimumSize = New Size(1250, 680)
+
+        ' 窗体图标：加载嵌入资源里的 app.ico（同时 exe 文件图标也由 vbproj 的 ApplicationIcon 指定）
+        Try
+            Using icoStream = GetType(MainForm).Assembly.GetManifestResourceStream("GitPushTool.app.ico")
+                If icoStream IsNot Nothing Then Me.Icon = New Icon(icoStream)
+            End Using
+        Catch
+            ' 图标加载失败不影响主流程
+        End Try
 
         ' ========== 左侧：推送面板 ==========
         pnlPush = New Panel() With {
@@ -147,48 +163,55 @@ Public Class MainForm
         txtMsg = New TextBox() With {.Text = "初始化提交", .Location = New Point(90, 182), .Size = New Size(400, 23)}
         pnlPush.Controls.Add(txtMsg)
 
-        ' 版本号 + tag + 确认升级
+        ' 版本号：自动从不同项目类型里探测读取，文本框设为只读（不可手工修改）
         lblVersion = New Label() With {.Text = "版本号：", .Location = New Point(10, 220), .AutoSize = True}
         pnlPush.Controls.Add(lblVersion)
-        txtVersion = New TextBox() With {.Text = "1.0.0.0", .Location = New Point(90, 217), .Size = New Size(130, 23)}
+        txtVersion = New TextBox() With {
+            .Text = "",
+            .Location = New Point(90, 217),
+            .Size = New Size(130, 23),
+            .ReadOnly = True,               ' 版本号只读，禁止手改
+            .BackColor = Color.WhiteSmoke,  ' 用浅灰底色直观提示“不可编辑”
+            .TabStop = False                ' 不参与 Tab 焦点切换
+        }
         pnlPush.Controls.Add(txtVersion)
         chkTag = New CheckBox() With {.Text = "同步打 tag", .Location = New Point(230, 220), .AutoSize = True, .Checked = False}
         pnlPush.Controls.Add(chkTag)
         txtTag = New TextBox() With {.Text = "v1.0.0", .Location = New Point(330, 217), .Size = New Size(160, 23)}
         pnlPush.Controls.Add(txtTag)
 
-        btnUpgradeVersion = New Button() With {
-            .Text = "确认升级",
-            .Location = New Point(330, 247),
-            .Size = New Size(160, 28),
-            .BackColor = Color.LightSteelBlue,
-            .FlatStyle = FlatStyle.Flat
+        ' 版本号来源提示（例如：来源：GitPushTool.exe 的 FileVersion）
+        lblVersionInfo = New Label() With {
+            .Text = "",
+            .Location = New Point(90, 243),
+            .Size = New Size(400, 16),
+            .ForeColor = Color.Gray,
+            .AutoEllipsis = True
         }
-        btnUpgradeVersion.FlatAppearance.BorderSize = 0
-        pnlPush.Controls.Add(btnUpgradeVersion)
+        pnlPush.Controls.Add(lblVersionInfo)
 
-        ' 选项
-        chkInit = New CheckBox() With {.Text = "自动 git init", .Location = New Point(90, 285), .AutoSize = True, .Checked = True}
+        ' 选项（删除“确认升级”按钮后整体上移，避免留空）
+        chkInit = New CheckBox() With {.Text = "自动 git init", .Location = New Point(90, 268), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkInit)
-        chkIgnore = New CheckBox() With {.Text = "生成 .gitignore", .Location = New Point(210, 285), .AutoSize = True, .Checked = True}
+        chkIgnore = New CheckBox() With {.Text = "生成 .gitignore", .Location = New Point(210, 268), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkIgnore)
-        chkReadme = New CheckBox() With {.Text = "生成 README.md", .Location = New Point(340, 285), .AutoSize = True, .Checked = True}
+        chkReadme = New CheckBox() With {.Text = "生成 README.md", .Location = New Point(340, 268), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkReadme)
-        chkCreateRepo = New CheckBox() With {.Text = "自动建远程仓库", .Location = New Point(90, 315), .AutoSize = True, .Checked = True}
+        chkCreateRepo = New CheckBox() With {.Text = "自动建远程仓库", .Location = New Point(90, 296), .AutoSize = True, .Checked = True}
         pnlPush.Controls.Add(chkCreateRepo)
-        chkForce = New CheckBox() With {.Text = "强制覆盖推送（--force）", .Location = New Point(240, 315), .AutoSize = True, .Checked = False}
+        chkForce = New CheckBox() With {.Text = "强制覆盖推送（--force）", .Location = New Point(240, 296), .AutoSize = True, .Checked = False}
         pnlPush.Controls.Add(chkForce)
 
         ' 按钮
-        btnSettings = New Button() With {.Text = "设置", .Location = New Point(90, 350), .Size = New Size(90, 32), .UseVisualStyleBackColor = True}
+        btnSettings = New Button() With {.Text = "设置", .Location = New Point(90, 330), .Size = New Size(90, 32), .UseVisualStyleBackColor = True}
         pnlPush.Controls.Add(btnSettings)
-        btnPush = New Button() With {.Text = "创建并推送", .Location = New Point(330, 350), .Size = New Size(160, 32), .UseVisualStyleBackColor = True}
+        btnPush = New Button() With {.Text = "创建并推送", .Location = New Point(330, 330), .Size = New Size(160, 32), .UseVisualStyleBackColor = True}
         pnlPush.Controls.Add(btnPush)
 
         ' 提示
         lblHint = New Label() With {
             .Text = "提示：可把项目文件夹拖到窗口自动填入项目路径",
-            .Location = New Point(10, 395),
+            .Location = New Point(10, 372),
             .AutoSize = True,
             .ForeColor = Color.Gray
         }
@@ -293,14 +316,14 @@ Public Class MainForm
         AddHandler btnBrowse.Click, AddressOf btnBrowse_Click
         AddHandler chkTag.CheckedChanged, Sub()
                                               If chkTag.Checked Then
-                                                  txtTag.Text = txtVersion.Text.Trim()
+                                                  ' 勾选打 tag 时，用探测到的版本号生成默认 tag 名
+                                                  txtTag.Text = BuildTagName(txtVersion.Text.Trim())
                                               Else
                                                   txtTag.Text = ""
                                               End If
                                           End Sub
         AddHandler btnPush.Click, AddressOf btnPush_Click
         AddHandler btnSettings.Click, AddressOf btnSettings_Click
-        AddHandler btnUpgradeVersion.Click, AddressOf btnUpgradeVersion_Click
         AddHandler txtProject.TextChanged, AddressOf txtProject_TextChanged
         AddHandler btnRefresh.Click, AddressOf btnRefresh_Click
         AddHandler txtSearch.TextChanged, AddressOf txtSearch_TextChanged
@@ -323,10 +346,8 @@ Public Class MainForm
             If c.HasChildren Then EnableDragDropRecursive(c)
         Next
     End Sub
-    '设置统一的控件是否启用（升级按钮、版本号、打tag、推送）
+    '设置统一的控件是否启用（打 tag、推送）；版本号始终只读展示，不参与启用开关
     Private Sub SetControlsEnabled(enabled As Boolean)
-        txtVersion.Enabled = enabled
-        btnUpgradeVersion.Enabled = enabled
         chkTag.Enabled = enabled
         btnPush.Enabled = enabled
     End Sub
@@ -468,9 +489,19 @@ Public Class MainForm
 
 
 
-            ' 自动读取 .vbproj 版本号
+            ' 自动探测版本号（支持 VB/C# 工程、Node、Maven、Gradle、Flutter、Rust、Python、
+            ' AndroidManifest、Info.plist、编译产物 exe/dll、apk/aab 等，探测顺序见 ReadProjectVersion）
             Dim v = ReadProjectVersion(dir)
-            If v <> "" Then txtVersion.Text = v Else txtVersion.Text = "1.0.0.0"
+            If v <> "" Then
+                txtVersion.Text = v
+            Else
+                ' 工程文件、编译产物里都没有版本信息时，按初始版本处理
+                txtVersion.Text = InitialVersion
+            End If
+            lblVersionInfo.Text = versionSourceText   ' 展示版本号来源，便于确认探测是否正确
+
+            ' 版本号变化后同步刷新默认 tag 名
+            If chkTag.Checked Then txtTag.Text = BuildTagName(txtVersion.Text.Trim())
 
             ' 自动读取 README.md 内容
             Dim readmePath = Path.Combine(dir, "README.md")
@@ -479,6 +510,13 @@ Public Class MainForm
             Else
                 txtReadme.Text = DefaultReadme(name)
             End If
+
+            ' 统一整理 README：立即替换 {项目名}/{用户名} 占位符 + 刷新目录结构
+            ' （此前占位符只在推送时替换，面板里会一直显示模板占位符）
+            NormalizeReadme(dir, name)
+
+            ' 自动把探测到的版本号同步进 README 的更新日志（无需再手动点“确认升级”）
+            If v <> "" Then AutoSyncReadmeVersion(v)
         Catch
         End Try
     End Sub
@@ -519,118 +557,278 @@ Public Class MainForm
                         "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
     End Sub
 
-    ' ==================== 确认升级版本号 ====================
-    ''' <summary>确认升级：写回 .vbproj → 重读版本号 → 同步 README 并写回磁盘</summary>
-    Private Sub btnUpgradeVersion_Click(sender As Object, e As EventArgs)
-        Dim projectPath = txtProject.Text.Trim()
-        If projectPath = "" OrElse Not Directory.Exists(projectPath) Then
-            MessageBox.Show("请先选择有效的项目路径！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
-            Return
-        End If
+    ' ==================== README 版本号自动同步 ====================
+    ''' <summary>
+    ''' 自动把探测到的版本号同步到 README 的更新日志（替代原来的“确认升级”按钮）：
+    ''' 1) 若更新日志第一条记录的版本号与探测值一致 → 仅刷新该条日期
+    ''' 2) 若不一致 → 在更新日志最前面插入一条新版本记录，保留历史记录
+    ''' 3) README 没有“更新日志”小节时自动补齐标题再插入
+    ''' 4) 最后刷新末尾的 _Generated by GitPushTool ..._ 时间戳
+    ''' </summary>
+    Private Sub AutoSyncReadmeVersion(newVer As String)
+        ' 无版本号或 README 为空时不处理
+        If String.IsNullOrWhiteSpace(newVer) Then Return
+        Dim text = txtReadme.Text
+        If String.IsNullOrWhiteSpace(text) Then Return
 
-        Dim newVer = txtVersion.Text.Trim()
-        If newVer = "" Then
-            MessageBox.Show("版本号不能为空！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
-            Return
-        End If
+        ' 统一换行符后按行拆分处理，避免 CRLF / LF 混用导致正则失配
+        Dim lines = New List(Of String)(text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(vbLf))
+        Dim today = DateTime.Now.ToString("yyyy-MM-dd")
 
-        suppressProjectChanged = True
-        Try
-            ' 旧版本号（仅用于提示，不参与匹配）
-            Dim oldVer = ReadProjectVersion(projectPath)
-
-            ' 写回 .vbproj
-            WriteProjectVersion(projectPath, newVer)
-
-            ' 重读实际值
-            Dim realVer = ReadProjectVersion(projectPath)
-            If realVer <> "" Then txtVersion.Text = realVer
-
-            ' 同步 README（不再依赖 oldVer 匹配，直接替换第一条 ### 版本号）
-            If realVer <> "" Then
-                SyncReadmeVersion(oldVer, realVer)
+        ' 定位更新日志里第一条 "### vX.Y.Z (日期)" 记录（第一条 = 最新版本）
+        Dim idx = -1
+        Dim oldVer As String = ""
+        For i = 0 To lines.Count - 1
+            Dim m = Regex.Match(lines(i), "^(#{2,6})[ \t]*v?(\d+(?:\.\d+){1,3})[ \t]*(\([^)]*\))?[ \t]*$")
+            If m.Success Then
+                idx = i
+                oldVer = m.Groups(2).Value
+                Exit For
             End If
+        Next
 
-            SaveConfig()
-            MessageBox.Show($"版本号已升级到：{realVer}" & vbCrLf & "README 已同步。",
-                            "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
-        Finally
-            suppressProjectChanged = False
+        If idx >= 0 AndAlso VersionEquals(oldVer, newVer) Then
+            ' 版本号没变：只刷新这一条记录的日期
+            lines(idx) = "### v" & newVer & " (" & today & ")"
+        Else
+            ' 版本号变了（或 README 里还没有版本记录）：插入一条新记录，保留历史
+            Dim entry = New List(Of String) From {
+                "### v" & newVer & " (" & today & ")",
+                "",
+                If(IsFirstReleaseVersion(newVer), "- 初始版本", "- 版本更新"),
+                ""
+            }
+            If idx >= 0 Then
+                lines.InsertRange(idx, entry)                       ' 插到现有记录前面
+            Else
+                Dim insertAt = InsertChangelogHeader(lines)         ' 没有“更新日志”小节则先补标题
+                lines.InsertRange(insertAt, entry)
+            End If
+        End If
+
+        ' 刷新末尾生成时间戳
+        RefreshGeneratedStamp(lines)
+
+        Dim newText = String.Join(vbCrLf, lines)
+        If newText = text Then
+            Log("==> [版本号] README 已是最新版本 " & newVer & "，无需修改")
+        Else
+            txtReadme.Text = newText
+            Log($"==> [版本号] README 已自动同步为 {newVer}")
+        End If
+    End Sub
+
+    ''' <summary>判断 README 里是否已有“更新日志”标题，没有则补一个；返回内容应插入的行号</summary>
+    Private Function InsertChangelogHeader(lines As List(Of String)) As Integer
+        ' 已存在 "## 📝 更新日志" 之类的小节：插到标题下一行
+        For i = 0 To lines.Count - 1
+            If Regex.IsMatch(lines(i), "^##\s*.*更新日志") Then
+                Return i + 1
+            End If
+        Next
+        ' 没有小节：插到末尾生成时间戳之前
+        For i = lines.Count - 1 To 0 Step -1
+            If lines(i).StartsWith("_Generated by GitPushTool on ") Then
+                lines.InsertRange(i, New String() {"## 📝 更新日志", ""})
+                Return i + 2
+            End If
+        Next
+        ' 兜底：追加到文件末尾
+        lines.Add("## 📝 更新日志")
+        lines.Add("")
+        Return lines.Count
+    End Function
+
+    ''' <summary>刷新 README 末尾的 _Generated by GitPushTool on xxx_ 时间戳</summary>
+    Private Sub RefreshGeneratedStamp(lines As List(Of String))
+        For i = 0 To lines.Count - 1
+            If Regex.IsMatch(lines(i), "_Generated by GitPushTool on ") Then
+                lines(i) = "_Generated by GitPushTool on " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & "_"
+                Return
+            End If
+        Next
+    End Sub
+
+    ''' <summary>比较两个版本号是否等价（位数不同时按 0 补齐，如 1.0 与 1.0.0 视为相同）</summary>
+    Private Function VersionEquals(a As String, b As String) As Boolean
+        If String.IsNullOrWhiteSpace(a) OrElse String.IsNullOrWhiteSpace(b) Then Return False
+        Dim pa = a.Split("."c)
+        Dim pb = b.Split("."c)
+        Dim n = Math.Max(pa.Length, pb.Length)
+        For i = 0 To n - 1
+            ' 缺失的段按 0 处理；非数字段直接按字符串比较
+            Dim sa = If(i < pa.Length, pa(i).Trim(), "0")
+            Dim sb2 = If(i < pb.Length, pb(i).Trim(), "0")
+            Dim na As Long = 0, nb As Long = 0
+            Dim okA = Long.TryParse(sa, na)
+            Dim okB = Long.TryParse(sb2, nb)
+            If okA AndAlso okB Then
+                If na <> nb Then Return False
+            ElseIf String.Compare(sa, sb2, StringComparison.OrdinalIgnoreCase) <> 0 Then
+                Return False
+            End If
+        Next
+        Return True
+    End Function
+
+    ''' <summary>根据版本号生成默认 tag 名（取前三段并加 v 前缀，如 2.3.9.4 -> v2.3.9）</summary>
+    Private Function BuildTagName(ver As String) As String
+        Dim s = If(ver, "").Trim()
+        If s = "" Then Return ""
+        Dim segs = s.Split("."c)
+        If segs.Length >= 3 Then Return "v" & segs(0) & "." & segs(1) & "." & segs(2)
+        Return "v" & s
+    End Function
+
+    ' ==================== README 占位符与目录结构 ====================
+    ''' <summary>
+    ''' 统一整理 README 面板内容：
+    ''' 1) 立即把 {项目名}/{用户名} 占位符替换为真实值（不再等到推送时才替换）
+    ''' 2) 把"目录结构"小节刷新为当前项目的真实目录树
+    ''' </summary>
+    Private Sub NormalizeReadme(projectDir As String, projName As String)
+        If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
+
+        ' 1) 占位符替换（{项目名} / {用户名}）
+        txtReadme.Text = txtReadme.Text.Replace("{项目名}", projName).Replace("{用户名}", currentUser)
+
+        ' 2) 目录结构刷新（以当前项目实际目录为准）
+        UpdateReadmeDirectoryTree(projectDir)
+    End Sub
+
+    ''' <summary>
+    ''' 更新 README 里"目录结构"小节：替换该标题下第一个代码块的内容
+    ''' 没有该小节时自动补齐（插到"更新日志"之前），没有代码块时自动插入
+    ''' </summary>
+    Private Sub UpdateReadmeDirectoryTree(projectDir As String)
+        ' 先生成目录树文本；生成失败或为空则不改动 README
+        Dim tree = BuildDirectoryTree(projectDir)
+        If String.IsNullOrWhiteSpace(tree) Then Return
+
+        ' 统一换行符后按行处理，避免 CRLF / LF 混用
+        Dim lines = New List(Of String)(txtReadme.Text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Split(vbLf))
+
+        ' 定位 "## 📁 目录结构" 标题
+        Dim headIdx = -1
+        For i = 0 To lines.Count - 1
+            If Regex.IsMatch(lines(i), "^#{1,6}\s*.*目录结构") Then
+                headIdx = i
+                Exit For
+            End If
+        Next
+
+        If headIdx < 0 Then
+            ' 没有小节：插到"更新日志"标题之前；找不到就追加到末尾
+            Dim insertAt = lines.Count
+            For i = 0 To lines.Count - 1
+                If Regex.IsMatch(lines(i), "^#{1,6}\s*.*更新日志") Then
+                    insertAt = i
+                    Exit For
+                End If
+            Next
+            lines.InsertRange(insertAt, New String() {"## 📁 目录结构", "", "```", "", "```", ""})
+            headIdx = insertAt
+        End If
+
+        ' 在标题之后找第一对 ``` 代码块（遇到下一个标题就停）
+        Dim fenceOpen = -1
+        For i = headIdx + 1 To lines.Count - 1
+            If lines(i).TrimStart().StartsWith("```") Then
+                fenceOpen = i
+                Exit For
+            End If
+            If Regex.IsMatch(lines(i), "^#{1,6}\s") Then Exit For
+        Next
+
+        Dim treeLines = New List(Of String)(tree.Split(vbLf))
+        If fenceOpen >= 0 Then
+            ' 找闭合围栏
+            Dim fenceClose = -1
+            For i = fenceOpen + 1 To lines.Count - 1
+                If lines(i).TrimStart().StartsWith("```") Then
+                    fenceClose = i
+                    Exit For
+                End If
+            Next
+            If fenceClose < 0 Then
+                ' 代码块没有闭合：插入目录树并补上闭合围栏
+                treeLines.Add("```")
+                lines.InsertRange(fenceOpen + 1, treeLines)
+            Else
+                ' 用新的目录树替换代码块内部内容
+                lines.RemoveRange(fenceOpen + 1, fenceClose - fenceOpen - 1)
+                lines.InsertRange(fenceOpen + 1, treeLines)
+            End If
+        Else
+            ' 标题下没有代码块：直接插入一个完整代码块
+            Dim block As New List(Of String) From {"```"}
+            block.AddRange(treeLines)
+            block.Add("```")
+            lines.InsertRange(headIdx + 1, block)
+        End If
+
+        txtReadme.Text = String.Join(vbCrLf, lines)
+    End Sub
+
+    ''' <summary>生成项目目录结构树文本（根目录行 + 各层条目，跳过构建/依赖目录，最多 3 层）</summary>
+    Private Function BuildDirectoryTree(projectDir As String) As String
+        Try
+            If String.IsNullOrWhiteSpace(projectDir) OrElse Not Directory.Exists(projectDir) Then Return ""
+            Dim sb As New StringBuilder()
+            ' 第一行：根目录名
+            sb.AppendLine(New DirectoryInfo(projectDir).Name & "/")
+            AppendTreeLevel(sb, projectDir, "", 0, 3)
+            Return sb.ToString().TrimEnd()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' 递归拼接目录树的一层；每层先列子目录再列文件，均按名称排序
+    ''' 单层最多列 MaxEntriesPerLevel 项，超出部分用省略行表示，避免 README 过长
+    ''' </summary>
+    Private Sub AppendTreeLevel(sb As StringBuilder, dir As String, indent As String, level As Integer, maxLevel As Integer)
+        Try
+            ' 收集本层条目：Key=名称，Value=是否目录
+            Dim entries As New List(Of KeyValuePair(Of String, Boolean))()
+            For Each d In Directory.GetDirectories(dir)
+                Dim nm = New DirectoryInfo(d).Name
+                If IsSkipDirectory(nm) Then Continue For
+                entries.Add(New KeyValuePair(Of String, Boolean)(nm, True))
+            Next
+            For Each f In Directory.GetFiles(dir)
+                entries.Add(New KeyValuePair(Of String, Boolean)(Path.GetFileName(f), False))
+            Next
+            ' 先目录后文件，各按名称排序
+            entries = entries.OrderBy(Function(e) If(e.Value, 0, 1)).ThenBy(Function(e) e.Key, StringComparer.OrdinalIgnoreCase).ToList()
+
+            Dim total = entries.Count
+            Dim shown = Math.Min(total, MaxTreeEntriesPerLevel)
+            For i = 0 To shown - 1
+                ' 是否为本层最后一个条目（本层被截断时永远不是最后一个）
+                Dim isLast = (i = shown - 1) AndAlso (total <= MaxTreeEntriesPerLevel)
+                Dim e = entries(i)
+                sb.Append(indent).Append(If(isLast, "└── ", "├── "))
+                If e.Value Then
+                    ' 目录：名称后加 /，并在未到最大层级时递归展开
+                    sb.Append(e.Key).Append("/").AppendLine()
+                    If level + 1 < maxLevel Then
+                        AppendTreeLevel(sb, Path.Combine(dir, e.Key),
+                                        indent & If(isLast, "    ", "│   "), level + 1, maxLevel)
+                    End If
+                Else
+                    sb.Append(e.Key).AppendLine()
+                End If
+            Next
+            ' 本层条目被截断时补一行省略提示
+            If total > MaxTreeEntriesPerLevel Then
+                sb.Append(indent).Append("└── …（其余 ").Append(total - MaxTreeEntriesPerLevel).Append(" 项未列出）").AppendLine()
+            End If
+        Catch
+            ' 单个目录读取失败跳过即可
         End Try
     End Sub
-
-    ' ==================== README 版本号同步相关 ====================
-    ''' <summary>
-    ''' 同步 README 里的版本号、更新日志日期、末尾生成时间、初始版本提示语
-    ''' 说明：不再依赖 oldVer 匹配，直接找第一条 ### 版本号并替换
-    ''' </summary>
-    Private Sub SyncReadmeVersion(oldVer As String, newVer As String)
-        If newVer = "" Then Return
-
-        Dim text = txtReadme.Text
-        If String.IsNullOrEmpty(text) Then Return
-        Dim original = text
-
-        ' 1) 替换第一条 ### vX.Y.Z 里的版本号
-        text = ReplaceFirstVersionInReadme(text, newVer)
-
-        ' 2) 刷新更新日志日期（仅当前新版本那一行）
-        text = Regex.Replace(text,
-            "(###\s*v?" & Regex.Escape(newVer) & "\s*\()(\d{4}-\d{2}-\d{2})(\))",
-            "${1}" & DateTime.Now.ToString("yyyy-MM-dd") & "${3}",
-            RegexOptions.IgnoreCase)
-
-        ' 3) 刷新末尾生成时间
-        text = Regex.Replace(text,
-            "(_Generated by GitPushTool on )([^_\r\n]+)(_)",
-            "${1}" & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & "${3}",
-            RegexOptions.IgnoreCase)
-
-        ' 4) 更新"初始版本"提示语（如果不是 1.0.0 系列，改为"版本更新"）
-        text = UpdateInitialReleaseText(text, newVer)
-
-        txtReadme.Text = text
-
-        If text = original Then
-            Log("==> [版本号] README 中未找到需要替换的版本号")
-        Else
-            Log($"==> [版本号] README 已同步为新版本 {newVer}")
-        End If
-    End Sub
-
-    ''' <summary>只替换 README 里出现的第一个更新日志版本号（保留历史记录）</summary>
-    Private Function ReplaceFirstVersionInReadme(text As String, newVer As String) As String
-        If String.IsNullOrEmpty(text) Then Return text
-        Dim pattern = "(#{2,6}\s*)v?(\d+\.\d+(?:\.\d+)?(?:\.\d+)?)(?=\s|\(|\r|\n|$)"
-        Dim replaced As Boolean = False
-        Dim updated = Regex.Replace(text, pattern,
-            Function(m)
-                If replaced Then Return m.Value
-                replaced = True
-                Return m.Groups(1).Value & "v" & newVer
-            End Function,
-            RegexOptions.IgnoreCase)
-        Return updated
-    End Function
-
-    ''' <summary>
-    ''' 更新"当前版本"标题行下的第一条 "- xxx" 提示语
-    ''' 若新版本是 1.0.0 系列，写"初始版本"；否则写"版本更新"
-    ''' </summary>
-    Private Function UpdateInitialReleaseText(text As String, newVer As String) As String
-        If String.IsNullOrEmpty(text) OrElse newVer = "" Then Return text
-
-        Dim isFirstRelease As Boolean = IsFirstReleaseVersion(newVer)
-        Dim newLine = If(isFirstRelease, "- 初始版本", "- 版本更新")
-
-        ' 找到 "### v<newVer> ..." 这一行，然后把紧随其后的第一个 "- xxx" 行替换
-        Dim pattern = "(###\s*v?" & Regex.Escape(newVer) & "[^\r\n]*\r?\n)" &
-                      "(\s*\r?\n)?" &
-                      "(\s*-\s*[^\r\n]*)"
-        Dim replacement = "${1}${2}" & newLine
-
-        Return Regex.Replace(text, pattern, replacement, RegexOptions.IgnoreCase)
-    End Function
 
     ''' <summary>判断是否属于 "1.0.0" 初始版本系列（主 1 次 0 修订 0）</summary>
     Private Function IsFirstReleaseVersion(v As String) As Boolean
@@ -801,21 +999,143 @@ Public Class MainForm
         Return ""
     End Function
 
-    ' ==================== 项目版本号读写 ====================
-    ''' <summary>在项目目录里找 .vbproj 并读取版本号（Version &gt; AssemblyVersion &gt; FileVersion）</summary>
+    ' ==================== 项目版本号自动探测 ====================
+    ''' <summary>
+    ''' 在项目目录里自动探测版本号（只读，不写回），按优先级依次尝试：
+    ''' VB/C# 工程 → AndroidManifest → Gradle → Flutter → Node → Maven → Rust →
+    ''' Python → Info.plist → nuspec → apk/aab（aapt）→
+    ''' 编译输出目录（bin\Release / bin\Debug 下的 exe/dll）→ 其它子目录的 exe/dll
+    ''' 工程文件里没有版本号时，会回退读取编译产物的文件版本；全部都没有则返回空串，
+    ''' 由调用方按初始版本（InitialVersion）处理。探测来源写入 versionSourceText 供界面提示
+    ''' </summary>
     Private Function ReadProjectVersion(projectDir As String) As String
+        versionSourceText = ""
         Try
-            Dim projFiles = Directory.GetFiles(projectDir, "*.vbproj", SearchOption.TopDirectoryOnly)
-            If projFiles.Length = 0 Then Return ""
-            Dim content = File.ReadAllText(projFiles(0), Encoding.UTF8)
+            If String.IsNullOrWhiteSpace(projectDir) OrElse Not Directory.Exists(projectDir) Then Return ""
 
-            Dim v = GetXmlTagValue(content, "Version")
-            If v <> "" Then Return v
-            v = GetXmlTagValue(content, "AssemblyVersion")
-            If v <> "" Then Return v
-            v = GetXmlTagValue(content, "FileVersion")
-            If v <> "" Then Return v
-        Catch
+            Dim v As String = ""
+
+            ' 1) .NET 工程文件：Version > AssemblyVersion > FileVersion > VersionPrefix
+            For Each ext In New String() {"*.vbproj", "*.csproj", "*.fsproj"}
+                Dim projFiles = Directory.GetFiles(projectDir, ext, SearchOption.TopDirectoryOnly)
+                If projFiles.Length = 0 Then Continue For
+                Dim content = File.ReadAllText(projFiles(0), Encoding.UTF8)
+                v = GetXmlTagValue(content, "Version")
+                If v = "" Then v = GetXmlTagValue(content, "AssemblyVersion")
+                If v = "" Then v = GetXmlTagValue(content, "FileVersion")
+                If v = "" Then v = GetXmlTagValue(content, "VersionPrefix")
+                If v <> "" Then
+                    versionSourceText = "来源：" & Path.GetFileName(projFiles(0))
+                    Return v
+                End If
+            Next
+
+            ' 2) AndroidManifest.xml：android:versionName="x"
+            v = FirstMatchInFile(projectDir, "AndroidManifest.xml", "android:versionName\s*=\s*""([^""]+)""")
+            If v <> "" Then
+                versionSourceText = "来源：AndroidManifest.xml"
+                Return v
+            End If
+
+            ' 3) Gradle（Android）：versionName "x" 或 versionName = "x"
+            v = FirstMatchInFile(projectDir, "build.gradle", "versionName\s+['""]([^'""]+)['""]")
+            If v = "" Then v = FirstMatchInFile(projectDir, "build.gradle.kts", "versionName\s*=\s*['""]([^'""]+)['""]")
+            If v <> "" Then
+                versionSourceText = "来源：build.gradle(.kts)"
+                Return v
+            End If
+
+            ' 4) Flutter：pubspec.yaml 的 version: 1.2.3+4（+ 后是构建号，去掉）
+            v = FirstMatchInFile(projectDir, "pubspec.yaml", "(?m)^\s*version\s*:\s*([^\s+#]+)")
+            If v <> "" Then
+                versionSourceText = "来源：pubspec.yaml"
+                Return v
+            End If
+
+            ' 5) Node / 前端 / Electron：package.json 的 "version": "x"
+            v = FirstMatchInFile(projectDir, "package.json", """version""\s*:\s*""([^""]+)""")
+            If v <> "" Then
+                versionSourceText = "来源：package.json"
+                Return v
+            End If
+
+            ' 6) Maven：pom.xml 的第一个 <version>（跳过含 ${} 的占位符）
+            v = FirstMatchInFile(projectDir, "pom.xml", "<version>([^$<>]+)</version>")
+            If v <> "" Then
+                versionSourceText = "来源：pom.xml"
+                Return v
+            End If
+
+            ' 7) Rust：Cargo.toml 的 version = "x"
+            v = FirstMatchInFile(projectDir, "Cargo.toml", "(?m)^\s*version\s*=\s*""([^""]+)""")
+            If v <> "" Then
+                versionSourceText = "来源：Cargo.toml"
+                Return v
+            End If
+
+            ' 8) Python：pyproject.toml / setup.py / setup.cfg
+            v = FirstMatchInFile(projectDir, "pyproject.toml", "(?m)^\s*version\s*=\s*""([^""]+)""")
+            If v = "" Then v = FirstMatchInFile(projectDir, "setup.py", "version\s*=\s*['""]([^'""]+)['""]")
+            If v = "" Then v = FirstMatchInFile(projectDir, "setup.cfg", "(?m)^\s*version\s*=\s*([^\r\n#]+)")
+            If v <> "" Then
+                versionSourceText = "来源：Python 打包配置"
+                Return v
+            End If
+
+            ' 9) iOS / macOS：Info.plist 的 CFBundleShortVersionString
+            v = FirstMatchInFile(projectDir, "Info.plist",
+                                 "<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>")
+            If v <> "" Then
+                versionSourceText = "来源：Info.plist"
+                Return v
+            End If
+
+            ' 10) NuGet：*.nuspec 的 <version>
+            For Each f In Directory.GetFiles(projectDir, "*.nuspec", SearchOption.TopDirectoryOnly)
+                v = GetXmlTagValue(File.ReadAllText(f, Encoding.UTF8), "version")
+                If v <> "" Then
+                    versionSourceText = "来源：" & Path.GetFileName(f)
+                    Return v
+                End If
+            Next
+
+            ' 11) apk / aab：用 Android SDK 的 aapt(aapt2) dump badging 读取 versionName
+            '     Android 产物在 app\build\outputs\apk 下，所以这里允许进入 build 目录
+            Dim pkg = FindLatestFile(projectDir, New String() {"*.apk", "*.aab"}, allowBuildDirs:=True)
+            If pkg <> "" Then
+                v = TryGetAndroidPackageVersion(pkg)
+                If v <> "" Then
+                    versionSourceText = "来源：" & Path.GetFileName(pkg)
+                    Return v
+                End If
+            End If
+
+            ' 12) 编译输出目录里的 exe / dll：bin\Release\<tfm>\、bin\Debug\<tfm>\ 等
+            '     工程文件里没写版本号时，编译产物的文件版本就是最可靠的来源
+            Dim buildOut = FindLatestBuildOutput(projectDir)
+            If buildOut <> "" Then
+                v = TryGetFileVersion(buildOut)
+                If v <> "" Then
+                    versionSourceText = "来源：" & Path.GetFileName(buildOut) & "（编译输出）"
+                    Return v
+                End If
+            End If
+
+            ' 13) 兜底：项目其它子目录里的 exe / dll（仍然跳过依赖与构建垃圾目录）
+            Dim bin = FindLatestFile(projectDir, New String() {"*.exe", "*.dll"})
+            If bin <> "" Then
+                v = TryGetFileVersion(bin)
+                If v <> "" Then
+                    versionSourceText = "来源：" & Path.GetFileName(bin)
+                    Return v
+                End If
+            End If
+
+            ' 14) 全部都没有：返回空串，由调用方按初始版本处理
+            versionSourceText = "未识别到版本号，按初始版本 " & InitialVersion & " 处理"
+
+        Catch ex As Exception
+            versionSourceText = "版本号读取失败：" & ex.Message
         End Try
         Return ""
     End Function
@@ -827,52 +1147,221 @@ Public Class MainForm
         Return ""
     End Function
 
-    ''' <summary>把版本号写回 .vbproj（Version / AssemblyVersion / FileVersion；Version 不存在时自动插入）</summary>
-    Private Sub WriteProjectVersion(projectDir As String, version As String)
-        If version = "" Then Return
+    ''' <summary>在项目目录（含子目录，跳过构建/依赖目录）里找指定文件名，并用正则第一个分组取值</summary>
+    Private Function FirstMatchInFile(projectDir As String, fileName As String, pattern As String) As String
         Try
-            Dim projFiles = Directory.GetFiles(projectDir, "*.vbproj", SearchOption.TopDirectoryOnly)
-            If projFiles.Length = 0 Then
-                Log("==> [版本号] 未找到 .vbproj，跳过")
-                Return
-            End If
-
-            Dim path = projFiles(0)
-            Dim content = File.ReadAllText(path, Encoding.UTF8)
-
-            ' Version：不存在则插入
-            content = EnsureXmlTag(content, "Version", version)
-            ' AssemblyVersion / FileVersion：存在才替换
-            content = ReplaceXmlTagIfExists(content, "AssemblyVersion", version)
-            content = ReplaceXmlTagIfExists(content, "FileVersion", version)
-
-            File.WriteAllText(path, content, New UTF8Encoding(False))
-            Log($"==> [版本号] 已写入 {IO.Path.GetFileName(path)}：{version}")
-        Catch ex As Exception
-            Log("==> [版本号] 写入失败：" & ex.Message)
+            Dim f = FindFile(projectDir, fileName)
+            If f = "" Then Return ""
+            Dim content = File.ReadAllText(f, Encoding.UTF8)
+            Dim m = Regex.Match(content, pattern)
+            If m.Success Then Return m.Groups(1).Value.Trim()
+        Catch
+            ' 读取或匹配失败按“没找到”处理
         End Try
-    End Sub
-
-    ''' <summary>确保 &lt;tag&gt; 存在；不存在则插入到第一个 PropertyGroup 内</summary>
-    Private Function EnsureXmlTag(xml As String, tag As String, value As String) As String
-        If Regex.IsMatch(xml, "<" & tag & ">", RegexOptions.IgnoreCase) Then
-            Return Regex.Replace(xml, "(<" & tag & ">)(.*?)(</" & tag & ">)",
-                                 "${1}" & value & "${3}", RegexOptions.IgnoreCase)
-        End If
-        Dim m = Regex.Match(xml, "<PropertyGroup[^>]*>", RegexOptions.IgnoreCase)
-        If m.Success Then
-            Dim insertPos = m.Index + m.Length
-            Dim insertText = vbCrLf & "    <" & tag & ">" & value & "</" & tag & ">"
-            Return xml.Substring(0, insertPos) & insertText & xml.Substring(insertPos)
-        End If
-        Return xml
+        Return ""
     End Function
 
-    ''' <summary>仅当 &lt;tag&gt; 存在时才替换</summary>
-    Private Function ReplaceXmlTagIfExists(xml As String, tag As String, value As String) As String
-        If Not Regex.IsMatch(xml, "<" & tag & ">", RegexOptions.IgnoreCase) Then Return xml
-        Return Regex.Replace(xml, "(<" & tag & ">)(.*?)(</" & tag & ">)",
-                             "${1}" & value & "${3}", RegexOptions.IgnoreCase)
+    ''' <summary>在项目目录里递归查找指定文件名（最多 5 层，跳过 bin/obj/node_modules 等目录）</summary>
+    Private Function FindFile(projectDir As String, fileName As String) As String
+        Try
+            Dim dirs As New Queue(Of String)()
+            dirs.Enqueue(projectDir)
+            Dim depth = 0
+            While dirs.Count > 0 AndAlso depth < 5
+                Dim count = dirs.Count
+                For i = 1 To count
+                    Dim d = dirs.Dequeue()
+                    Dim hit = Path.Combine(d, fileName)
+                    If File.Exists(hit) Then Return hit
+                    For Each subDir In Directory.GetDirectories(d)
+                        Dim nm = New DirectoryInfo(subDir).Name
+                        If IsSkipDirectory(nm) Then Continue For
+                        dirs.Enqueue(subDir)
+                    Next
+                Next
+                depth += 1
+            End While
+        Catch
+        End Try
+        Return ""
+    End Function
+
+    ''' <summary>
+    ''' 在项目目录里找最近修改的匹配文件（apk/aab/exe/dll 等），最多下探 6 层
+    ''' allowBuildDirs=True 时允许进入 bin/build/out 等构建目录（找产物时需要）
+    ''' </summary>
+    Private Function FindLatestFile(projectDir As String, patterns As String(), Optional allowBuildDirs As Boolean = False) As String
+        Dim best = ""
+        Dim bestTime = DateTime.MinValue
+        Try
+            Dim dirs As New Queue(Of String)()
+            dirs.Enqueue(projectDir)
+            Dim depth = 0
+            While dirs.Count > 0 AndAlso depth < 6
+                Dim count = dirs.Count
+                For i = 1 To count
+                    Dim d = dirs.Dequeue()
+                    For Each pat In patterns
+                        For Each f In Directory.GetFiles(d, pat, SearchOption.TopDirectoryOnly)
+                            Dim t = File.GetLastWriteTime(f)
+                            If t > bestTime Then
+                                bestTime = t
+                                best = f
+                            End If
+                        Next
+                    Next
+                    For Each subDir In Directory.GetDirectories(d)
+                        If IsSkipDirectory(New DirectoryInfo(subDir).Name, allowBuildDirs) Then Continue For
+                        dirs.Enqueue(subDir)
+                    Next
+                Next
+                depth += 1
+            End While
+        Catch
+        End Try
+        Return best
+    End Function
+
+    ''' <summary>
+    ''' 在项目编译输出目录里找最新的 exe/dll（工程文件里没写版本号时的主要来源）
+    ''' 依次尝试 bin\Release → bin\Debug → bin → publish → out
+    ''' 目标框架目录名（net10.0-windows / net8.0 等）不固定，这里递归扫描而不硬编码
+    ''' </summary>
+    Private Function FindLatestBuildOutput(projectDir As String) As String
+        Dim roots As New List(Of String)()
+        Dim binDir = Path.Combine(projectDir, "bin")
+        If Directory.Exists(binDir) Then
+            roots.Add(Path.Combine(binDir, "Release"))   ' 优先 Release 产物
+            roots.Add(Path.Combine(binDir, "Debug"))
+            roots.Add(binDir)                            ' 兜底：bin 下的其它布局
+        End If
+        roots.Add(Path.Combine(projectDir, "publish"))   ' dotnet publish 的输出
+        roots.Add(Path.Combine(projectDir, "out"))       ' 部分工具的发布目录
+
+        For Each root In roots
+            If Not Directory.Exists(root) Then Continue For
+            ' 优先找主程序 exe；类库项目只有 dll 时再退而求其次
+            Dim hit = FindLatestFileNoSkip(root, New String() {"*.exe"}, 3)
+            If hit = "" Then hit = FindLatestFileNoSkip(root, New String() {"*.exe", "*.dll"}, 3)
+            If hit <> "" Then Return hit
+        Next
+        Return ""
+    End Function
+
+    ''' <summary>在指定根目录下递归查找最近修改的匹配文件（不过滤任何目录，专用于构建输出目录）</summary>
+    Private Function FindLatestFileNoSkip(root As String, patterns As String(), maxDepth As Integer) As String
+        Dim best = ""
+        Dim bestTime = DateTime.MinValue
+        Try
+            Dim dirs As New Queue(Of String)()
+            dirs.Enqueue(root)
+            Dim depth = 0
+            While dirs.Count > 0 AndAlso depth <= maxDepth
+                Dim count = dirs.Count
+                For i = 1 To count
+                    Dim d = dirs.Dequeue()
+                    ' 排除中间产物目录，避免取到 obj/refs 之类的临时 dll
+                    If New DirectoryInfo(d).Name.Equals("ref", StringComparison.OrdinalIgnoreCase) Then Continue For
+                    For Each pat In patterns
+                        For Each f In Directory.GetFiles(d, pat, SearchOption.TopDirectoryOnly)
+                            Dim t = File.GetLastWriteTime(f)
+                            If t > bestTime Then
+                                bestTime = t
+                                best = f
+                            End If
+                        Next
+                    Next
+                    For Each subDir In Directory.GetDirectories(d)
+                        dirs.Enqueue(subDir)
+                    Next
+                Next
+                depth += 1
+            End While
+        Catch
+        End Try
+        Return best
+    End Function
+
+    ''' <summary>读取 exe/dll 的文件版本号（FileVersion 优先，其次 ProductVersion）</summary>
+    Private Function TryGetFileVersion(filePath As String) As String
+        Try
+            Dim fvi = FileVersionInfo.GetVersionInfo(filePath)
+            Dim v = If(fvi.FileVersion, fvi.ProductVersion)
+            If Not String.IsNullOrWhiteSpace(v) Then Return v.Trim()
+        Catch
+            ' 单个文件读取失败不影响后续探测
+        End Try
+        Return ""
+    End Function
+
+    ''' <summary>
+    ''' 版本探测时需要跳过的目录（依赖、版本控制等）
+    ''' includeBuildDirs=False 时额外跳过 bin/obj/build/dist/out（找源配置文件时避免误读生成物）
+    ''' </summary>
+    Private Function IsSkipDirectory(name As String, Optional includeBuildDirs As Boolean = False) As Boolean
+        Dim skip As New List(Of String) From {
+            "node_modules", "packages", "vendor", "Pods", ".gradle", ".git", ".vs"
+        }
+        If Not includeBuildDirs Then
+            skip.AddRange(New String() {"bin", "obj", "build", "dist", "out"})
+        End If
+        Return skip.Contains(name) OrElse name.StartsWith(".")
+    End Function
+
+    ''' <summary>用 Android SDK 的 aapt / aapt2 读取 apk、aab 的 versionName</summary>
+    Private Function TryGetAndroidPackageVersion(packageFile As String) As String
+        Try
+            Dim aapt = FindAapt()
+            If aapt = "" Then Return ""
+            Dim psi As New ProcessStartInfo() With {
+                .FileName = aapt,
+                .Arguments = $"dump badging ""{packageFile}""",
+                .RedirectStandardOutput = True,
+                .UseShellExecute = False,
+                .CreateNoWindow = True,
+                .StandardOutputEncoding = Encoding.UTF8
+            }
+            Using p As Process = Process.Start(psi)
+                Dim output = p.StandardOutput.ReadToEnd()
+                p.WaitForExit()
+                ' 输出形如：package: name='xxx' versionCode='12' versionName='1.2.3'
+                Dim m = Regex.Match(output, "versionName='([^']+)'")
+                If m.Success Then Return m.Groups(1).Value.Trim()
+            End Using
+        Catch
+        End Try
+        Return ""
+    End Function
+
+    ''' <summary>查找可用的 aapt.exe / aapt2.exe（优先 ANDROID_HOME / ANDROID_SDK_ROOT 环境变量）</summary>
+    Private Function FindAapt() As String
+        Try
+            Dim roots As New List(Of String)()
+            For Each evn In New String() {"ANDROID_HOME", "ANDROID_SDK_ROOT"}
+                Dim val = Environment.GetEnvironmentVariable(evn)
+                If Not String.IsNullOrWhiteSpace(val) Then roots.Add(val)
+            Next
+            ' 默认 SDK 安装位置兜底
+            roots.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                   "Android", "Sdk"))
+
+            For Each root In roots
+                If Not Directory.Exists(root) Then Continue For
+                Dim bt = Path.Combine(root, "build-tools")
+                If Not Directory.Exists(bt) Then Continue For
+                ' 取版本号最大的一套 build-tools（里面的 aapt 支持的格式更新）
+                Dim versions = Directory.GetDirectories(bt).
+                    OrderByDescending(Function(x) New DirectoryInfo(x).Name).ToList()
+                For Each ver In versions
+                    For Each exe In New String() {"aapt.exe", "aapt2.exe"}
+                        Dim p = Path.Combine(ver, exe)
+                        If File.Exists(p) Then Return p
+                    Next
+                Next
+            Next
+        Catch
+        End Try
+        Return ""
     End Function
 
     ' ==================== 配置读写 ====================
@@ -958,7 +1447,7 @@ Public Class MainForm
     End Sub
 
     ' ==================== 推送主流程 ====================
-    ''' <summary>推送按钮：init → add → commit → tag → push（版本号由“确认升级”按钮控制）</summary>
+    ''' <summary>推送按钮：init → add → commit → tag → push（版本号只读自动探测，README 版本自动同步）</summary>
     Private Async Sub btnPush_Click(sender As Object, e As EventArgs)
         Dim projectPath = txtProject.Text.Trim()
         Dim repoUrl = txtRepo.Text.Trim()
@@ -979,17 +1468,19 @@ Public Class MainForm
         End If
         If commitMsg = "" Then commitMsg = "初始化提交"
 
-        ' 版本号一致性检查
-        Dim projVer = ReadProjectVersion(projectPath)
-        If projVer <> "" AndAlso projVer <> txtVersion.Text.Trim() Then
-            Dim r = MessageBox.Show(
-                $"当前 .vbproj 里的版本号是 {projVer}，" & vbCrLf &
-                $"界面里填的是 {txtVersion.Text.Trim()}。" & vbCrLf & vbCrLf &
-                "是否先执行「确认升级」？",
-                "版本号不一致", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
-            If r = DialogResult.Yes Then
-                btnUpgradeVersion_Click(Nothing, Nothing)
-            End If
+        ' 推送前重新探测一次版本号（版本号只读，保证与项目实际情况一致）
+        Dim detectedVer = ReadProjectVersion(projectPath)
+        If detectedVer <> "" Then
+            txtVersion.Text = detectedVer
+            lblVersionInfo.Text = versionSourceText
+        Else
+            ' 工程文件与编译产物里都没有版本信息：按初始版本处理
+            txtVersion.Text = InitialVersion
+            lblVersionInfo.Text = versionSourceText
+        End If
+        ' tag 名为空时用当前版本号生成默认值（初始版本即 v1.0.0）
+        If chkTag.Checked AndAlso txtTag.Text.Trim() = "" Then
+            txtTag.Text = BuildTagName(txtVersion.Text.Trim())
         End If
 
         SaveConfig()
@@ -1022,16 +1513,18 @@ Public Class MainForm
                 End If
             End If
 
-            ' README.md
+            ' README.md：写入磁盘前统一整理（占位符替换 + 目录结构刷新 + 版本号同步）
             If chkReadme.Checked Then
                 Dim readmePath = Path.Combine(projectPath, "README.md")
                 Dim projName = New DirectoryInfo(projectPath).Name
-                Dim content = txtReadme.Text
-                If String.IsNullOrWhiteSpace(content) Then content = DefaultReadme(projName)
-                content = content.Replace("{项目名}", projName).Replace("{用户名}", currentUser)
+                If String.IsNullOrWhiteSpace(txtReadme.Text) Then txtReadme.Text = DefaultReadme(projName)
+                ' 替换 {项目名}/{用户名} 占位符，并把目录结构刷新为推送时的真实结构
+                NormalizeReadme(projectPath, projName)
+                ' 自动把探测到的版本号同步进 README（新版本号会插入一条更新记录）
+                If detectedVer <> "" Then AutoSyncReadmeVersion(detectedVer)
 
                 Log("==> 写入 README.md")
-                File.WriteAllText(readmePath, content, New UTF8Encoding(False))
+                File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
             End If
 
             ' 自动创建远程仓库
@@ -1083,26 +1576,25 @@ Public Class MainForm
             Log("==> git branch -M main")
             Await RunGitAsync(gitExe, projectPath, "branch -M main")
 
-            ' ---- 打 tag ----
+            ' ---- 打 tag（保留 Git 仓库原有 tag，只创建/更新当前这一个）----
             If chkTag.Checked Then
                 Dim tagName = txtTag.Text.Trim()
                 If tagName = "" Then
-                    Dim segs = txtVersion.Text.Trim().Split("."c)
-                    If segs.Length >= 3 Then
-                        tagName = "v" & segs(0) & "." & segs(1) & "." & segs(2)
-                    Else
-                        tagName = "v" & txtVersion.Text.Trim()
-                    End If
+                    ' 未填 tag 名时用版本号生成默认值（取前三段，加 v 前缀）
+                    tagName = BuildTagName(txtVersion.Text.Trim())
                     txtTag.Text = tagName
                 End If
 
-                Log("==> 清理远程历史 tag")
-                Await DeleteAllRemoteTagsAsync(gitExe, projectPath)
-
-                Await RunGitAsync(gitExe, projectPath, $"tag -d ""{tagName}""", ignoreError:=True)
-
-                Log($"==> git tag {tagName}")
-                Await RunGitAsync(gitExe, projectPath, $"tag ""{tagName}""", ignoreError:=True)
+                If tagName <> "" Then
+                    ' 本地同名 tag 若已存在则强制重新指向当前提交（不影响其他任何 tag）
+                    If Await LocalTagExistsAsync(gitExe, projectPath, tagName) Then
+                        Log($"==> git tag -f {tagName}（本地同名 tag 已存在，重新指向当前提交）")
+                        Await RunGitAsync(gitExe, projectPath, $"tag -f ""{tagName}""", ignoreError:=True)
+                    Else
+                        Log($"==> git tag {tagName}")
+                        Await RunGitAsync(gitExe, projectPath, $"tag ""{tagName}""", ignoreError:=True)
+                    End If
+                End If
             End If
 
             ' ---- 推代码 ----
@@ -1116,7 +1608,8 @@ Public Class MainForm
 
             ' ---- 推 tag ----
             If chkTag.Checked AndAlso txtTag.Text.Trim() <> "" Then
-                Log($"==> git push origin {txtTag.Text.Trim()} --force")
+                ' 只强制推送当前这一个 tag（不会影响仓库里的其他 tag）
+                Log($"==> git push origin {txtTag.Text.Trim()}（仅推送当前 tag，保留仓库原有 tag）")
                 Await RunGitAsync(gitExe, projectPath, $"push origin ""{txtTag.Text.Trim()}"" --force", ignoreError:=True)
             End If
 
@@ -1162,52 +1655,30 @@ Public Class MainForm
         Return result
     End Function
 
-    ''' <summary>删除远程仓库里的所有 tag（逐个删除；本地保留）</summary>
-    Private Async Function DeleteAllRemoteTagsAsync(gitExe As String, workDir As String) As Task
-        Dim remoteTags As New List(Of String)
-        Try
-            Dim psi As New ProcessStartInfo() With {
-                .FileName = gitExe,
-                .Arguments = "ls-remote --tags origin",
-                .WorkingDirectory = workDir,
-                .RedirectStandardOutput = True,
-                .UseShellExecute = False,
-                .CreateNoWindow = True
-            }
-            Dim output As String = ""
-            Await Task.Run(Sub()
+    ''' <summary>判断本地仓库里是否已存在某个 tag（用于决定是否用 -f 重新指向）</summary>
+    Private Async Function LocalTagExistsAsync(gitExe As String, workDir As String, tagName As String) As Task(Of Boolean)
+        Dim exists As Boolean = False
+        Await Task.Run(Sub()
+                           Try
+                               Dim psi As New ProcessStartInfo() With {
+                                   .FileName = gitExe,
+                                   .Arguments = $"tag -l ""{tagName}""",
+                                   .WorkingDirectory = workDir,
+                                   .RedirectStandardOutput = True,
+                                   .UseShellExecute = False,
+                                   .CreateNoWindow = True
+                               }
                                Using p As Process = Process.Start(psi)
-                                   output = p.StandardOutput.ReadToEnd()
+                                   Dim output = p.StandardOutput.ReadToEnd()
                                    p.WaitForExit()
+                                   exists = output.Split({ControlChars.Cr, ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries).
+                                                   Any(Function(s) s.Trim() = tagName)
                                End Using
-                           End Sub)
-
-            For Each line In output.Split({ControlChars.Cr, ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries)
-                Dim parts = line.Split(ControlChars.Tab)
-                If parts.Length >= 2 Then
-                    Dim refName = parts(1).Trim()
-                    If refName.StartsWith("refs/tags/") AndAlso Not refName.EndsWith("^{}") Then
-                        Dim tagName = refName.Substring("refs/tags/".Length)
-                        If Not remoteTags.Contains(tagName) Then remoteTags.Add(tagName)
-                    End If
-                End If
-            Next
-        Catch ex As Exception
-            Log("    [tag] 列出远程 tag 失败：" & ex.Message)
-        End Try
-
-        For Each t In remoteTags
-            Log($"    删除远程 tag：{t}")
-            Await RunGitAsync(gitExe, workDir, $"push origin :refs/tags/{t}", ignoreError:=True)
-        Next
-
-        For Each t In remoteTags
-            Await RunGitAsync(gitExe, workDir, $"tag -d ""{t}""", ignoreError:=True)
-        Next
-
-        If remoteTags.Count = 0 Then
-            Log("    没有需要清理的历史 tag")
-        End If
+                           Catch
+                               ' 查询失败按“不存在”处理，走普通 tag 创建
+                           End Try
+                       End Sub)
+        Return exists
     End Function
 
     ''' <summary>把 PAT 注入到 https 地址中</summary>
