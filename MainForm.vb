@@ -1162,49 +1162,80 @@ Public Class MainForm
         End Try
     End Sub
 
-    ''' <summary>查找项目图标文件：先在常见资源目录按常见文件名找，再退而取目录里第一张图片</summary>
+    ''' <summary>
+    ''' 查找项目图标：不做文件名白名单，只按扩展名匹配
+    ''' 扩展名优先级：ico（程序/应用图标）→ png → jpg → svg
+    ''' 先查项目根与常见资源目录（仅顶层），没有再浅层递归整个项目
+    ''' </summary>
     Private Function FindProjectIcon(projectDir As String) As String
         Try
-            ' 常见图标文件名（不区分大小写，File.Exists 在 Windows 上天然不区分）
-            Dim names = New String() {
-                "icon.png", "app.png", "logo.png", "appicon.png", "favicon.png",
-                "icon.jpg", "logo.jpg",
-                "icon.svg", "logo.svg",
-                "icon.ico", "app.ico", "favicon.ico", "logo.ico"
-            }
+            Dim exts = New String() {"*.ico", "*.png", "*.jpg", "*.jpeg", "*.svg"}
             ' 常见资源目录（"" 表示项目根目录）
-            Dim dirs = New String() {"", "docs", "images", "img", "assets", "res", "Resources", "public", "static", "icons"}
+            Dim dirs = New String() {"", "Resources", "res", "assets", "icons", "icon",
+                                     "images", "img", "docs", "public", "static"}
 
-            ' 第一轮：按明确文件名逐个匹配
+            ' 第一轮：根目录与常见资源目录下按扩展名找
             For Each d In dirs
-                For Each n In names
-                    Dim p = If(d = "", Path.Combine(projectDir, n), Path.Combine(projectDir, d, n))
-                    If File.Exists(p) Then Return p
-                Next
-            Next
-
-            ' 第二轮：在资源目录里取第一张图片（任意文件名）
-            For Each d In dirs
-                If d = "" Then Continue For
-                Dim dd = Path.Combine(projectDir, d)
+                Dim dd = If(d = "", projectDir, Path.Combine(projectDir, d))
                 If Not Directory.Exists(dd) Then Continue For
-                For Each pat In New String() {"*.png", "*.jpg", "*.jpeg", "*.svg", "*.ico"}
-                    Dim files = Directory.GetFiles(dd, pat, SearchOption.TopDirectoryOnly)
-                    If files.Length > 0 Then Return files(0)
+                For Each ext In exts
+                    Dim files = Directory.GetFiles(dd, ext, SearchOption.TopDirectoryOnly)
+                    If files.Length > 0 Then Return PickPreferredIcon(files)
                 Next
             Next
 
-            ' 第三轮：Android 启动器图标（ic_launcher.png，位于 res\mipmap-* 下）
-            Dim androidIcon = FindFile(projectDir, "ic_launcher.png")
-            If androidIcon <> "" Then Return androidIcon
+            ' 第二轮：整个项目浅层递归（跳过 bin/obj/node_modules 等目录）
+            For Each ext In New String() {"*.ico", "*.png"}
+                Dim hit = FindFirstFileByPattern(projectDir, ext, 3)
+                If hit <> "" Then Return hit
+            Next
         Catch
         End Try
         Return ""
     End Function
 
     ''' <summary>
-    ''' 把图标导入到项目的 docs 目录，返回相对 README 的路径（如 docs/icon.png）
-    ''' ico 会被转成 256×256 的 PNG（GitHub 不渲染 .ico）；png/jpg/svg 直接复制
+    ''' 从候选图标里挑最合适的：文件名含 icon / logo / app / favicon 的优先
+    ''' 都没有则取第一个（文件名完全无法预测时的兜底）
+    ''' </summary>
+    Private Function PickPreferredIcon(files As String()) As String
+        Dim hints = New String() {"icon", "logo", "app", "favicon"}
+        For Each h In hints
+            For Each f In files
+                If Path.GetFileNameWithoutExtension(f).ToLowerInvariant().Contains(h) Then Return f
+            Next
+        Next
+        Return files(0)
+    End Function
+
+    ''' <summary>在项目目录里浅层递归查找第一个匹配通配符的文件（跳过构建/依赖目录）</summary>
+    Private Function FindFirstFileByPattern(projectDir As String, pattern As String, maxDepth As Integer) As String
+        Try
+            Dim dirs As New Queue(Of String)()
+            dirs.Enqueue(projectDir)
+            Dim depth = 0
+            While dirs.Count > 0 AndAlso depth <= maxDepth
+                Dim count = dirs.Count
+                For i = 1 To count
+                    Dim d = dirs.Dequeue()
+                    Dim files = Directory.GetFiles(d, pattern, SearchOption.TopDirectoryOnly)
+                    If files.Length > 0 Then Return PickPreferredIcon(files)
+                    For Each subDir In Directory.GetDirectories(d)
+                        If IsSkipDirectory(New DirectoryInfo(subDir).Name) Then Continue For
+                        dirs.Enqueue(subDir)
+                    Next
+                Next
+                depth += 1
+            End While
+        Catch
+        End Try
+        Return ""
+    End Function
+
+    ''' <summary>
+    ''' 把图标导入到项目的 docs 目录，返回相对 README 的路径（如 docs/app.png）
+    ''' 文件名沿用原图标名：ico 只换扩展名（xxx.ico → xxx.png），png/jpg/svg 原名复制
+    ''' ico 会被转成 PNG（GitHub 不渲染 .ico）；png/jpg/svg 直接复制
     ''' 目标文件已存在且不比源文件旧时跳过，保证重复调用幂等
     ''' </summary>
     Private Function ImportProjectIcon(projectDir As String, srcPath As String) As String
@@ -1213,8 +1244,9 @@ Public Class MainForm
             If ext <> ".ico" AndAlso ext <> ".png" AndAlso ext <> ".jpg" AndAlso
                ext <> ".jpeg" AndAlso ext <> ".svg" Then Return ""
 
-            ' ico 统一转成 png；其它格式保留原扩展名
-            Dim destName = If(ext = ".ico", "icon.png", "icon" & ext)
+            ' 文件名保持与原图标一致：ico → 同名 .png，其它格式连扩展名都不改
+            Dim baseName = Path.GetFileNameWithoutExtension(srcPath)
+            Dim destName = If(ext = ".ico", baseName & ".png", Path.GetFileName(srcPath))
             Dim destDir = Path.Combine(projectDir, "docs")
             Dim destPath = Path.Combine(destDir, destName)
 
@@ -1229,7 +1261,7 @@ Public Class MainForm
             If ext = ".ico" Then
                 ' ICO → PNG（GitHub 不渲染 ico）
                 If Not ConvertIcoToPng(srcPath, destPath) Then Return ""
-                Log("==> [图标] 已由 " & Path.GetFileName(srcPath) & " 生成 docs/icon.png")
+                Log("==> [图标] 已由 " & Path.GetFileName(srcPath) & " 生成 docs/" & destName)
             Else
                 File.Copy(srcPath, destPath, True)
                 Log("==> [图标] 已导入 docs/" & destName)
@@ -1343,7 +1375,10 @@ Public Class MainForm
 
             Dim destDir = Path.Combine(projectDir, "docs")
             If Not Directory.Exists(destDir) Then Directory.CreateDirectory(destDir)
-            Dim destPath = Path.Combine(destDir, "icon.png")
+
+            ' 文件名沿用 apk 内部图标名（如 ic_launcher.png）
+            Dim entryName = Path.GetFileNameWithoutExtension(bestEntry) & ".png"
+            Dim destPath = Path.Combine(destDir, entryName)
 
             ' 直接从 apk（zip）里读出该图标条目并存为 PNG
             Using zip = ZipFile.OpenRead(apk)
@@ -1356,8 +1391,8 @@ Public Class MainForm
                 End Using
             End Using
 
-            Log("==> [图标] 已从 " & Path.GetFileName(apk) & " 提取图标 docs/icon.png")
-            Return "docs/icon.png"
+            Log("==> [图标] 已从 " & Path.GetFileName(apk) & " 提取图标 docs/" & entryName)
+            Return "docs/" & entryName
         Catch
             Return ""
         End Try
@@ -1982,7 +2017,7 @@ Public Class MainForm
         End If
 
         '先保存 README 到磁盘，避免关闭时丢失
-        WriteReadmeToDisk()
+        WriteReadmeToDisk(IsFormClosed)
 
         Try
             If Not Directory.Exists(configDir) Then Directory.CreateDirectory(configDir)
@@ -2006,7 +2041,7 @@ Public Class MainForm
     End Sub
 
     ''' <summary>把文本框里的 README 写回上次加载的项目路径</summary>
-    Private Sub WriteReadmeToDisk()
+    Private Sub WriteReadmeToDisk(Optional IsFormClosed As Boolean = False)
         Dim projectPath = txtProject.Text.Trim()
         If projectPath = "" OrElse Not Directory.Exists(projectPath) Then
             MessageBox.Show("请先选择有效的项目路径！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning)
@@ -2020,8 +2055,11 @@ Public Class MainForm
             File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
             Log($"==> [README] 已写入 {readmePath}")
 
-            ' 重新读取，确保编码和换行一致
-            txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
+            If Not IsFormClosed Then   '非关闭窗体时，写入后立即重新读取，确保编码和换行一致
+                ' 重新读取，确保编码和换行一致
+                txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
+            End If
+
         Catch ex As Exception
             Log("==> [README] 写入失败：" & ex.Message)
         End Try
