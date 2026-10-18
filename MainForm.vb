@@ -2115,16 +2115,31 @@ Public Class MainForm
         Try
             Await RunGitAsync(gitExe, projectPath, "--version")
 
+            ' firstPush 用于后面决定默认提交信息，必须在 init 之前计算
             Dim firstPush As Boolean = Not Directory.Exists(Path.Combine(projectPath, ".git"))
-            If chkInit.Checked AndAlso firstPush Then
-                Log("==> git init")
+
+            ' 关键：没有 .git 时必须先 init，否则后面的 config / remote / add / commit
+            ' 都会因 "fatal: not in a git directory" 返回退出码 128
+            ' （原逻辑里若未勾选"自动 git init"就会跳过 init，进而导致 git config 失败）
+            Dim gitDir = Path.Combine(projectPath, ".git")
+            If Not Directory.Exists(gitDir) Then
+                Log("==> 未检测到 .git，先执行 git init")
                 Await RunGitAsync(gitExe, projectPath, "init")
+                ' init 后再校验一次，仍未生成说明是权限/磁盘问题，直接给出明确提示
+                If Not Directory.Exists(gitDir) Then
+                    Throw New Exception("执行 git init 后仍未生成 .git 目录，请检查该目录是否有写入权限。")
+                End If
             Else
                 Log("==> 已存在 .git，跳过 init")
             End If
 
-            If userName <> "" Then Await RunGitAsync(gitExe, projectPath, $"config user.name ""{userName}""")
-            If userEmail <> "" Then Await RunGitAsync(gitExe, projectPath, $"config user.email ""{userEmail}""")
+            ' 配置提交身份：非关键步骤，写不进去（只读配置、权限受限）也不应中断推送
+            If userName <> "" Then
+                Await RunGitAsync(gitExe, projectPath, $"config user.name ""{userName}""", ignoreError:=True)
+            End If
+            If userEmail <> "" Then
+                Await RunGitAsync(gitExe, projectPath, $"config user.email ""{userEmail}""", ignoreError:=True)
+            End If
 
             ' .gitignore
             If chkIgnore.Checked Then
@@ -2194,8 +2209,14 @@ Public Class MainForm
                 finalMsg = "更新 " & DateTime.Now.ToString("yyyy-MM-dd HH:mm")
             End If
 
+            ' 提交身份用 -c 临时传入：即使上面 git config 写入失败（退出码 128 的常见场景），
+            ' 也不会因为没有 user.name / user.email 而导致提交失败
+            Dim identity As String = ""
+            If userName <> "" Then identity &= $" -c user.name=""{userName}"""
+            If userEmail <> "" Then identity &= $" -c user.email=""{userEmail}"""
+
             Log("==> git commit")
-            Await RunGitAsync(gitExe, projectPath, $"commit -m ""{finalMsg}""", ignoreError:=True)
+            Await RunGitAsync(gitExe, projectPath, identity & $" commit -m ""{finalMsg}""", ignoreError:=True)
 
             Log("==> git branch -M main")
             Await RunGitAsync(gitExe, projectPath, "branch -M main")
@@ -2246,8 +2267,17 @@ Public Class MainForm
             Await LoadRepoListAsync()
             MessageBox.Show("推送成功！", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
         Catch ex As Exception
-            Log(vbCrLf & "[错误] " & ex.Message)
-            MessageBox.Show("发生错误：" & ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Dim errMsg = ex.Message
+            ' 退出码 128 多与"不在 git 仓库内 / 无权限"有关，补充排查方向，方便定位
+            If errMsg.Contains("退出码 128") Then
+                errMsg &= vbCrLf & vbCrLf &
+                          "常见原因：" & vbCrLf &
+                          "1. 项目目录不是 git 仓库（未生成 .git）" & vbCrLf &
+                          "2. 目录没有写入权限（系统目录、只读磁盘、被安全软件拦截）" & vbCrLf &
+                          "3. .git/config 损坏或被其它程序占用"
+            End If
+            Log(vbCrLf & "[错误] " & errMsg)
+            MessageBox.Show("发生错误：" & errMsg, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
         Finally
             btnPush.Enabled = True
         End Try
@@ -2392,32 +2422,71 @@ Public Class MainForm
     End Function
 
     ' ==================== 执行 git ====================
-    ''' <summary>异步执行 git 命令，输出到日志</summary>
+    ''' <summary>
+    ''' 异步执行 git 命令，输出到日志。
+    ''' 命中 Git 2.35.2+ 的 safe.directory 安全检查（dubious ownership，即仓库目录所有者
+    ''' 与当前用户 SID 不一致）时，自动把该目录加入全局信任后重试一次
+    ''' </summary>
     Private Function RunGitAsync(gitExe As String, workDir As String, args As String, Optional ignoreError As Boolean = False) As Task
         Return Task.Run(Sub()
-                            Dim psi As New ProcessStartInfo() With {
-                                .FileName = gitExe,
-                                .Arguments = args,
-                                .WorkingDirectory = workDir,
-                                .RedirectStandardOutput = True,
-                                .RedirectStandardError = True,
-                                .UseShellExecute = False,
-                                .CreateNoWindow = True,
-                                .StandardOutputEncoding = Encoding.UTF8,
-                                .StandardErrorEncoding = Encoding.UTF8
-                            }
-                            Using p As Process = Process.Start(psi)
-                                Dim outText = p.StandardOutput.ReadToEnd()
-                                Dim errText = p.StandardError.ReadToEnd()
-                                p.WaitForExit()
-                                If Not String.IsNullOrWhiteSpace(outText) Then Log(outText.TrimEnd())
-                                If Not String.IsNullOrWhiteSpace(errText) Then Log("[stderr] " & errText.TrimEnd())
-                                If p.ExitCode <> 0 AndAlso Not ignoreError Then
-                                    Throw New Exception($"git {args} 退出码 {p.ExitCode}")
+                            Dim exitCode As Integer = 0
+                            Dim outText As String = ""
+                            Dim errText As String = ""
+
+                            ExecuteGit(gitExe, workDir, args, exitCode, outText, errText)
+
+                            ' safe.directory 修复：stderr 里出现 dubious ownership 说明仓库目录
+                            ' 所有者（如 BUILTIN\Administrators）与当前用户不一致，git 拒绝操作
+                            If exitCode <> 0 AndAlso errText.Contains("dubious ownership") Then
+                                ' safe.directory 的值需要用正斜杠（与 git 提示的格式一致）
+                                Dim dirNormal = workDir.Replace("\"c, "/"c)
+                                Log("==> [修复] 检测到 dubious ownership：目录所有者与当前用户不一致")
+                                Log($"==> [修复] git config --global --add safe.directory {dirNormal}")
+
+                                ' 先查全局配置里是否已有该目录，避免重复追加
+                                Dim existing As String = ""
+                                Dim ec As Integer = 0
+                                ExecuteGit(gitExe, "", "config --global --get-all safe.directory", ec, existing, errText)
+                                Dim already = existing.Split({ControlChars.Cr, ControlChars.Lf}, StringSplitOptions.RemoveEmptyEntries).
+                                                        Any(Function(s) s.Trim() = dirNormal)
+                                If Not already Then
+                                    Dim addErr As String = ""
+                                    ExecuteGit(gitExe, "", $"config --global --add safe.directory ""{dirNormal}""", ec, outText, addErr)
                                 End If
-                            End Using
+
+                                ' 重新执行原命令
+                                ExecuteGit(gitExe, workDir, args, exitCode, outText, errText)
+                            End If
+
+                            If exitCode <> 0 AndAlso Not ignoreError Then
+                                Throw New Exception($"git {args} 退出码 {exitCode}")
+                            End If
                         End Sub)
     End Function
+
+    ''' <summary>执行一条 git 命令：输出写入日志，退出码与 stdout / stderr 通过 ByRef 返回</summary>
+    Private Sub ExecuteGit(gitExe As String, workDir As String, args As String,
+                           ByRef exitCode As Integer, ByRef stdOut As String, ByRef stdErr As String)
+        Dim psi As New ProcessStartInfo() With {
+            .FileName = gitExe,
+            .Arguments = args,
+            .WorkingDirectory = workDir,
+            .RedirectStandardOutput = True,
+            .RedirectStandardError = True,
+            .UseShellExecute = False,
+            .CreateNoWindow = True,
+            .StandardOutputEncoding = Encoding.UTF8,
+            .StandardErrorEncoding = Encoding.UTF8
+        }
+        Using p As Process = Process.Start(psi)
+            stdOut = p.StandardOutput.ReadToEnd()
+            stdErr = p.StandardError.ReadToEnd()
+            p.WaitForExit()
+            exitCode = p.ExitCode
+            If Not String.IsNullOrWhiteSpace(stdOut) Then Log(stdOut.TrimEnd())
+            If Not String.IsNullOrWhiteSpace(stdErr) Then Log("[stderr] " & stdErr.TrimEnd())
+        End Using
+    End Sub
 
     ' ==================== 日志 ====================
     ''' <summary>线程安全地追加日志</summary>
