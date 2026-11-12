@@ -41,6 +41,8 @@ Public Class MainForm
     Private chkReadme As CheckBox        ' 生成 README.md
     Private chkCreateRepo As CheckBox    ' 自动建远程仓库
     Private chkForce As CheckBox         ' 强制覆盖推送
+    Private chkAccelerate As CheckBox    ' 推送前启用 FastGithub 加速（外部进程，默认关闭）
+    Private lblAccelerate As Label       ' 加速状态提示
     Private btnSettings As Button        ' 设置按钮
     Private btnPush As Button            ' 创建并推送按钮
     Private lblHint As Label             ' 提示文字
@@ -77,6 +79,19 @@ Public Class MainForm
 
     ' 生成 README 目录结构时每层最多列出的条目数（防止 README 过长）
     Private Const MaxTreeEntriesPerLevel As Integer = 12
+
+    ' 原项目 FastGithub.UI 的 UdpLogger 从这个端口开始探测并绑定，
+    ' 内置加速的 Serilog UDPSink 必须用同一端口，窗口才收得到日志
+    Private Const FastGithubUdpPortBase As Integer = 38457
+
+    ' 软件启动时就开始的加速预热任务；推送前会 Await 它，避免过早推送导致 502
+    Private accelerateStartTask As Task = Nothing
+    ' 随本工具打开的原项目加速窗口进程（关闭本工具时一并结束）
+    Private fastGithubUiProcess As Process = Nothing
+    ' 窗体是否已显示：避免 LoadConfig 恢复开关状态时提前触发加速启停
+    Private formShown As Boolean = False
+    ' 本次推送是否强制覆盖（用户在"远端分叉且冲突"弹窗里点「是」时置位）
+    Private forcePush As Boolean = False
 
     ' 配置文件目录与路径：C:\Users\Administrator\AppData\Roaming\GitPushTool
     Private ReadOnly configDir As String =
@@ -204,16 +219,23 @@ Public Class MainForm
         chkForce = New CheckBox() With {.Text = "强制覆盖推送（--force）", .Location = New Point(240, 296), .AutoSize = True, .Checked = False}
         pnlPush.Controls.Add(chkForce)
 
+        ' 可选加速：FastGithub 作为独立子进程启动，默认关闭，不影响原有单文件发布
+        ' 默认启用：软件启动时就同步拉起加速，而不是等到推送时才启动
+        chkAccelerate = New CheckBox() With {.Text = "启用 FastGithub 加速", .Location = New Point(90, 324), .AutoSize = True, .Checked = True}
+        pnlPush.Controls.Add(chkAccelerate)
+        lblAccelerate = New Label() With {.Text = "启动时自动启用", .Location = New Point(240, 326), .AutoSize = True, .ForeColor = Color.Gray}
+        pnlPush.Controls.Add(lblAccelerate)
+
         ' 按钮
-        btnSettings = New Button() With {.Text = "设置", .Location = New Point(90, 330), .Size = New Size(90, 32), .UseVisualStyleBackColor = True}
+        btnSettings = New Button() With {.Text = "设置", .Location = New Point(90, 354), .Size = New Size(90, 32), .UseVisualStyleBackColor = True}
         pnlPush.Controls.Add(btnSettings)
-        btnPush = New Button() With {.Text = "创建并推送", .Location = New Point(330, 330), .Size = New Size(160, 32), .UseVisualStyleBackColor = True}
+        btnPush = New Button() With {.Text = "创建并推送", .Location = New Point(330, 354), .Size = New Size(160, 32), .UseVisualStyleBackColor = True}
         pnlPush.Controls.Add(btnPush)
 
         ' 提示
         lblHint = New Label() With {
             .Text = "提示：可把项目文件夹拖到窗口自动填入项目路径",
-            .Location = New Point(10, 372),
+            .Location = New Point(10, 394),
             .AutoSize = True,
             .ForeColor = Color.Gray
         }
@@ -326,6 +348,7 @@ Public Class MainForm
                                           End Sub
         AddHandler btnPush.Click, AddressOf btnPush_Click
         AddHandler btnSettings.Click, AddressOf btnSettings_Click
+        AddHandler chkAccelerate.CheckedChanged, AddressOf chkAccelerate_CheckedChanged
         AddHandler txtProject.TextChanged, AddressOf txtProject_TextChanged
         AddHandler btnRefresh.Click, AddressOf btnRefresh_Click
         AddHandler txtSearch.TextChanged, AddressOf txtSearch_TextChanged
@@ -355,8 +378,13 @@ Public Class MainForm
     End Sub
 
     ' ==================== 窗体首次显示 ====================
-    ''' <summary>窗体首次显示时自动加载仓库列表</summary>
+    ''' <summary>窗体首次显示时：同步启用加速 + 加载仓库列表</summary>
     Private Async Sub MainForm_Shown(sender As Object, e As EventArgs)
+        formShown = True
+        ' 软件启动即启用加速（不再等推送时才启动），后台预热不阻塞界面显示
+        If chkAccelerate.Checked Then
+            accelerateStartTask = StartAccelerateAsync()
+        End If
         Await LoadRepoListAsync()
     End Sub
 
@@ -555,8 +583,234 @@ Public Class MainForm
         SaveConfig()
         MessageBox.Show("设置已保存。" & vbCrLf & vbCrLf &
                         "当前用户：" & currentUser & vbCrLf &
-                        "git.exe：" & If(currentGit = "", "(未找到)", currentGit),
+                        "git.exe：" & If(currentGit = "", "(未找到)", currentGit) & vbCrLf &
+                        "FastGithub：已并入（进程内项目引用）",
                         "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
+    End Sub
+
+    ' ==================== FastGithub 加速（进程内项目引用） ====================
+    ''' <summary>
+    ''' 软件启动时即调用：进程内启动 FastGithub + 就绪预热 + 打开原项目加速窗口。
+    ''' 返回的 Task 会在推送前被 Await，确保 DNS 劫持 / 证书 / dnscrypt-proxy / IP 优选
+    ''' 都已完成，避免"StartAsync 刚返回就 push"造成上游未就绪的 502。
+    ''' FastGithub 源码已并入 FastGithubSrc\，这里通过命名空间调用 FastGithub.FastGithubRunner。
+    ''' </summary>
+    Private Async Function StartAccelerateAsync() As Task
+        If FastGithub.FastGithubRunner.IsRunning Then
+            Log("==> [加速] FastGithub 已在进程内运行")
+            UpdateAccelerateStatus("加速已开启（进程内）")
+            Return
+        End If
+
+        Try
+            ' 单文件发布时，配置 / dnscrypt-proxy / 原窗口 exe 都内嵌在 exe 里，先释放到内容根目录
+            Dim contentRoot = PrepareFastGithubContentRoot()
+            Log("==> [加速] 进程内启动 FastGithub，内容目录：" & contentRoot)
+            Log("==> [加速] 首次启动会生成并安装自签 CA、初始化 dnscrypt-proxy")
+
+            ' 直接调用引用项目里的进程内托管入口（非阻塞 StartAsync）
+            Await FastGithub.FastGithubRunner.StartAsync(contentRoot, GetFreeUdpPort())
+            Log("==> [加速] Kestrel 已监听，开始就绪预热...")
+
+            ' 尽早打开原项目窗口，让用户能看到启动过程与实时日志
+            ShowFastGithubWindow(contentRoot)
+
+            ' 预热 1：等待 dnscrypt-proxy 子进程起来（DomainResolveHostedService 有 5 秒初始化延迟）
+            Dim dnsOk = False
+            For i = 1 To 20
+                If Process.GetProcessesByName("dnscrypt-proxy").Length > 0 Then
+                    dnsOk = True
+                    Exit For
+                End If
+                Await Task.Delay(1000)
+            Next
+            Log(If(dnsOk, "==> [加速] dnscrypt-proxy 已就绪",
+                         "==> [警告] 未检测到 dnscrypt-proxy，加速可能不稳定"))
+
+            ' 预热 2：探测 /flowStatistics，确认 HTTP 反向代理端口真正可用
+            Dim httpOk = False
+            Dim hc As New HttpClient()
+            hc.Timeout = TimeSpan.FromSeconds(2)
+            Try
+                For i = 1 To 8
+                    Try
+                        Dim resp = Await hc.GetAsync("http://localhost/flowStatistics")
+                        If resp.IsSuccessStatusCode Then
+                            httpOk = True
+                            Exit For
+                        End If
+                    Catch
+                        ' 端口还没起来，继续重试
+                    End Try
+                    Await Task.Delay(1000)
+                Next
+            Finally
+                hc.Dispose()
+            End Try
+            Log(If(httpOk, "==> [加速] 代理端口已就绪",
+                         "==> [警告] 未探测到 flowStatistics（80 端口可能被占用并顺延）"))
+
+            ' 预热 3：给 IP 测速 / DNS 缓存刷新留一点缓冲，避免首次请求命中未优选的上游
+            Await Task.Delay(3000)
+
+            Log("==> [加速] FastGithub 已就绪，git 与 GitHub API 请求自动走加速")
+            UpdateAccelerateStatus("加速已开启（窗口已打开）")
+        Catch ex As Exception
+            ' 端口被占用、无管理员权限、WinDivert 被拦截等：只记日志，不中断推送
+            Log("==> [加速] 启动失败（已跳过）：" & ex.Message)
+            UpdateAccelerateStatus("启动失败：" & ex.Message)
+        End Try
+    End Function
+
+    ''' <summary>推送前确认加速已就绪：等待启动时的预热任务完成，避免过早推送造成 502</summary>
+    Private Async Function EnsureFastGithubAsync() As Task
+        If Not chkAccelerate.Checked Then Return
+        ' 正常情况 Shown 时已开始启动；这里 Await 保证推送一定在预热之后
+        If accelerateStartTask Is Nothing Then
+            accelerateStartTask = StartAccelerateAsync()
+        End If
+        Await accelerateStartTask
+    End Function
+
+    ''' <summary>
+    ''' 把嵌入在单文件 exe 里的 FastGithub 运行时文件释放到
+    ''' %LOCALAPPDATA%\GitPushTool\fastgithub（appsettings.json、9 个域名规则、
+    ''' dnscrypt-proxy.exe / .toml、LICENSE）。
+    ''' FastGithub 内部大量使用相对路径（appsettings/、cacert/、logs/、dnscrypt-proxy/），
+    ''' 该目录既是内容根也是进程当前工作目录，因此必须落地为真实文件。
+    ''' </summary>
+    Private Function PrepareFastGithubContentRoot() As String
+        Dim root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                               "GitPushTool", "fastgithub")
+        Try
+            Directory.CreateDirectory(root)
+            Const prefix As String = "FastGithubRuntime/"
+            Dim asm = GetType(MainForm).Assembly
+            Dim resourceCount = 0   ' 统计嵌入的运行时资源数量，便于在日志里确认资源确实打进了 exe
+            For Each resName In asm.GetManifestResourceNames()
+                If Not resName.StartsWith(prefix, StringComparison.Ordinal) Then Continue For
+                resourceCount += 1
+
+                ' 逻辑名 "FastGithubRuntime/appsettings/xxx.json" → 实际相对路径
+                Dim rel = resName.Substring(prefix.Length).Replace("/"c, Path.DirectorySeparatorChar)
+                Dim dest = Path.Combine(root, rel)
+                Dim dir = Path.GetDirectoryName(dest)
+                If dir <> "" AndAlso Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
+
+                Using s = asm.GetManifestResourceStream(resName)
+                    If s Is Nothing Then Continue For
+                    ' 已释放且大小一致则跳过，避免每次推送都重复写（dnscrypt-proxy.exe 可能正被占用）
+                    If File.Exists(dest) AndAlso New FileInfo(dest).Length = s.Length Then Continue For
+                    Using fs As New FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None)
+                        s.CopyTo(fs)
+                    End Using
+                End Using
+            Next
+            Log("==> [加速] 内置运行时资源：" & resourceCount & " 项")
+            If resourceCount = 0 Then
+                Log("==> [警告] 未找到 FastGithubRuntime 嵌入资源，加速可能缺少配置文件")
+            End If
+        Catch ex As Exception
+            Log("==> [加速] 释放运行时文件失败：" & ex.Message)
+        End Try
+        Return root
+    End Function
+
+    ''' <summary>
+    ''' 打开原项目 FastGithub.UI 的窗口（"流量 / 日志 / 问答"三个页签）。
+    ''' 它是 net45 WPF 程序，无法被 net10.0-windows 项目直接引用，
+    ''' 所以把现成产物嵌入单文件 exe、运行时释放后作为独立窗口进程启动。
+    ''' 它启动时找不到同目录的 fastgithub.exe 会自行跳过子进程启动，
+    ''' 只负责收 UDP 日志、轮询 /flowStatistics 显示流量曲线。
+    ''' </summary>
+    Private Sub ShowFastGithubWindow(contentRoot As String)
+        Try
+            ' 原 UI 自带全局互斥体 Global\FastGithub.UI，已有实例就不重复打开
+            If Process.GetProcessesByName("FastGithub.UI").Length > 0 Then
+                Log("==> [加速] 加速窗口已在运行")
+                Return
+            End If
+
+            Dim ui = Path.Combine(contentRoot, "ui", "FastGithub.UI.exe")
+            If Not File.Exists(ui) Then
+                Log("==> [警告] 未找到内置加速窗口 FastGithub.UI.exe")
+                Return
+            End If
+
+            Dim psi As New ProcessStartInfo() With {
+                .FileName = ui,
+                .WorkingDirectory = Path.GetDirectoryName(ui),
+                .UseShellExecute = True   ' 继承本工具的管理员令牌，不会二次弹 UAC
+            }
+            fastGithubUiProcess = Process.Start(psi)
+            Log("==> [加速] 已打开原项目加速窗口（流量 / 日志 / 问答）")
+        Catch ex As Exception
+            Log("==> [加速] 打开加速窗口失败：" & ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>关闭随本工具打开的原项目加速窗口</summary>
+    Private Sub CloseFastGithubWindow()
+        Try
+            If fastGithubUiProcess IsNot Nothing AndAlso Not fastGithubUiProcess.HasExited Then
+                ' 原窗口的关闭按钮只是隐藏到托盘，这里直接结束它（窗口进程无系统状态需要恢复）
+                fastGithubUiProcess.Kill()
+                Log("==> [加速] 加速窗口已关闭")
+            End If
+        Catch
+        End Try
+        fastGithubUiProcess = Nothing
+    End Sub
+
+    ''' <summary>加速开关：勾上立即启动并显示窗口，取消则优雅停止并关闭窗口</summary>
+    Private Async Sub chkAccelerate_CheckedChanged(sender As Object, e As EventArgs)
+        lblAccelerate.Text = If(chkAccelerate.Checked, "启动时自动启用", "未启用")
+        If Not formShown Then Return   ' 配置加载阶段的状态变更不触发启停
+
+        If chkAccelerate.Checked Then
+            lblAccelerate.Text = "启动中..."
+            accelerateStartTask = StartAccelerateAsync()
+            Await accelerateStartTask
+            Return
+        End If
+
+        Try
+            If accelerateStartTask IsNot Nothing Then Await accelerateStartTask
+            Await FastGithub.FastGithubRunner.StopAsync()
+            CloseFastGithubWindow()
+            Log("==> [加速] FastGithub 已停止")
+        Catch ex As Exception
+            Log("==> [加速] 停止失败：" & ex.Message)
+        End Try
+        accelerateStartTask = Nothing
+    End Sub
+
+    ''' <summary>
+    ''' 取 UDP 日志端口：与原项目 UdpLogger.GetAvailableUdpPort(38457) 完全相同的算法，
+    ''' 保证 Serilog UDPSink 的发送端口 == 加速窗口绑定的端口，窗口才收得到日志。
+    ''' （UDPSink 只发送不监听，所以不会占用该端口）
+    ''' </summary>
+    Private Function GetFreeUdpPort() As Integer
+        Try
+            Dim used As New HashSet(Of Integer)()
+            For Each ep In System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveUdpListeners()
+                If ep.AddressFamily = System.Net.Sockets.AddressFamily.InterNetwork Then used.Add(ep.Port)
+            Next
+            For port As Integer = FastGithubUdpPortBase To FastGithubUdpPortBase + 1000
+                If Not used.Contains(port) Then Return port
+            Next
+        Catch
+        End Try
+        Return FastGithubUdpPortBase
+    End Function
+
+    ''' <summary>线程安全地更新加速状态标签</summary>
+    Private Sub UpdateAccelerateStatus(text As String)
+        If lblAccelerate.InvokeRequired Then
+            lblAccelerate.Invoke(Sub() UpdateAccelerateStatus(text))
+            Return
+        End If
+        lblAccelerate.Text = text
     End Sub
 
     ' ==================== README 版本号自动同步 ====================
@@ -2002,6 +2256,7 @@ Public Class MainForm
                     Case "email" : txtEmail.Text = v
                     Case "token" : txtToken.Text = v
                     Case "git" : If File.Exists(v) Then currentGit = v
+                    Case "accelerate" : chkAccelerate.Checked = (v = "1")
                 End Select
             Next
         Catch ex As Exception
@@ -2026,12 +2281,14 @@ Public Class MainForm
             sb.AppendLine("# user  : GitHub 用户名")
             sb.AppendLine("# email : git 提交邮箱")
             sb.AppendLine("# token : GitHub PAT")
-            sb.AppendLine("# git   : git.exe 完整路径（留空则自动探测）")
+            sb.AppendLine("# git        : git.exe 完整路径（留空则自动探测）")
+            sb.AppendLine("# accelerate : 是否启用内置 FastGithub 加速（1=启用，0=关闭）")
             sb.AppendLine()
             sb.AppendLine("user=" & currentUser)
             sb.AppendLine("email=" & txtEmail.Text.Trim())
             sb.AppendLine("token=" & txtToken.Text.Trim())
             sb.AppendLine("git=" & currentGit)
+            sb.AppendLine("accelerate=" & If(chkAccelerate.Checked, "1", "0"))
 
             File.WriteAllText(configFile, sb.ToString(), New UTF8Encoding(False))
         Catch ex As Exception
@@ -2065,9 +2322,24 @@ Public Class MainForm
         End Try
     End Sub
 
-    ''' <summary>窗体关闭时保存配置和 README</summary>
+    ''' <summary>窗体关闭时保存配置 / README，并优雅停止进程内的 FastGithub 主机</summary>
     Private Sub MainForm_FormClosing(sender As Object, e As FormClosingEventArgs)
         SaveConfig(IsFormClosed:=True)
+
+        ' 进程内集成后不再有"父进程退出自动 StopAsync"机制，必须显式调用 StopAsync：
+        ' 它会恢复 ProxyOverride、停掉 dnscrypt-proxy、释放 WinDivert 句柄
+        If FastGithub.FastGithubRunner.IsRunning Then
+            Try
+                ' 放到线程池里同步等待，避免在 UI 线程上直接 .Wait() 造成死锁
+                Task.Run(Sub() FastGithub.FastGithubRunner.StopAsync().GetAwaiter().GetResult()).
+                     Wait(TimeSpan.FromSeconds(5))
+                Log("==> [加速] FastGithub 已停止")
+            Catch ex As Exception
+                Log("==> [加速] 停止异常：" & ex.Message)
+            End Try
+        End If
+        ' 结束随本工具打开的原项目加速窗口
+        CloseFastGithubWindow()
     End Sub
 
     ' ==================== 推送主流程 ====================
@@ -2108,11 +2380,16 @@ Public Class MainForm
         End If
 
         SaveConfig()
+        forcePush = False   ' 每次推送重新计算，避免上次的覆盖决定残留
         btnPush.Enabled = False
         txtLog.Clear()
         Log("==> 使用 git：" & gitExe)
 
         Try
+            ' 可选：推送前拉起 FastGithub 加速（系统级透明加速，git 与 GitHub API 自动生效）
+            ' 未勾选或找不到组件时直接跳过，不影响原有流程
+            Await EnsureFastGithubAsync()
+
             Await RunGitAsync(gitExe, projectPath, "--version")
 
             ' firstPush 用于后面决定默认提交信息，必须在 init 之前计算
@@ -2221,6 +2498,18 @@ Public Class MainForm
             Log("==> git branch -M main")
             Await RunGitAsync(gitExe, projectPath, "branch -M main")
 
+            ' ---- 推送前同步远端（未勾选强制覆盖时）----
+            ' 放在打 tag 之前：rebase 可能产生新的提交 hash，tag 必须指向合并后的 HEAD
+            If Not chkForce.Checked Then
+                If Not Await ReconcileRemoteAsync(gitExe, projectPath) Then
+                    ' 提前还原远程地址，避免 PAT 残留在 .git/config 里
+                    If token <> "" Then
+                        Await RunGitAsync(gitExe, projectPath, $"remote set-url origin ""{repoUrl}""", ignoreError:=True)
+                    End If
+                    Return
+                End If
+            End If
+
             ' ---- 打 tag（保留 Git 仓库原有 tag，只创建/更新当前这一个）----
             If chkTag.Checked Then
                 Dim tagName = txtTag.Text.Trim()
@@ -2243,7 +2532,7 @@ Public Class MainForm
             End If
 
             ' ---- 推代码 ----
-            If chkForce.Checked Then
+            If chkForce.Checked OrElse forcePush Then
                 Log("==> git push -u origin main --force（强制覆盖）")
                 Await RunGitAsync(gitExe, projectPath, "push -u origin main --force")
             Else
@@ -2275,6 +2564,13 @@ Public Class MainForm
                           "1. 项目目录不是 git 仓库（未生成 .git）" & vbCrLf &
                           "2. 目录没有写入权限（系统目录、只读磁盘、被安全软件拦截）" & vbCrLf &
                           "3. .git/config 损坏或被其它程序占用"
+            ElseIf errMsg.Contains("push") AndAlso errMsg.Contains("退出码 1") Then
+                errMsg &= vbCrLf & vbCrLf &
+                          "推送被拒绝的常见原因：" & vbCrLf &
+                          "1. 远端有本地没有的提交（non-fast-forward，日志里有 fetch first / rejected）" & vbCrLf &
+                          "2. PAT 权限不足或令牌已过期" & vbCrLf &
+                          "3. 分支受保护规则限制" & vbCrLf &
+                          "可勾选「强制覆盖推送（--force）」后重试（会覆盖远端提交）"
             End If
             Log(vbCrLf & "[错误] " & errMsg)
             MessageBox.Show("发生错误：" & errMsg, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
@@ -2282,6 +2578,83 @@ Public Class MainForm
             btnPush.Enabled = True
         End Try
     End Sub
+
+    ' ==================== 远端同步（避免 non-fast-forward） ====================
+    ''' <summary>git 查询命令的结果载体</summary>
+    Private Class GitResult
+        Public Property ExitCode As Integer = -1   ' 退出码
+        Public Property Output As String = ""     ' stdout
+        Public Property ErrorText As String = ""  ' stderr
+    End Class
+
+    ''' <summary>异步执行一条 git 查询/合并命令并返回结果；不抛异常、不自动刷屏</summary>
+    Private Function QueryGitAsync(gitExe As String, workDir As String, args As String) As Task(Of GitResult)
+        Return Task.Run(Function()
+                            Dim r As New GitResult()
+                            Try
+                                Dim code As Integer = -1, outText As String = "", errText As String = ""
+                                ExecuteGit(gitExe, workDir, args, code, outText, errText, logOutput:=False)
+                                r.ExitCode = code
+                                r.Output = If(outText, "").Trim()
+                                r.ErrorText = If(errText, "").Trim()
+                            Catch ex As Exception
+                                r.ErrorText = ex.Message
+                            End Try
+                            Return r
+                        End Function)
+    End Function
+
+    ''' <summary>
+    ''' 推送前同步远端：先 fetch，若远端 main 领先则用普通 rebase 合并，
+    ''' 避免 "fetch first / non-fast-forward" 被拒，且完整保留两边的改动。
+    ''' 必须在打 tag 之前调用：rebase 会改变提交 hash，tag 要指向合并后的 HEAD。
+    ''' 冲突时 abort 回退并询问用户：同意强制覆盖则置 forcePush=True，否则中止（绝不静默丢数据）。
+    ''' </summary>
+    Private Async Function ReconcileRemoteAsync(gitExe As String, workDir As String) As Task(Of Boolean)
+        Log("==> 检查远端是否有新提交（git fetch）")
+        Dim fetch = Await QueryGitAsync(gitExe, workDir, "fetch origin main")
+        If fetch.ExitCode <> 0 Then
+            ' 空仓库 / 远端还没有 main：无需同步，直接推送即可
+            Log("==> 远端暂无 main 分支（可能是空仓库），跳过同步")
+            Return True
+        End If
+
+        ' HEAD..FETCH_HEAD 的提交数 = 远端领先的数量
+        Dim behindResult = Await QueryGitAsync(gitExe, workDir, "rev-list --count HEAD..FETCH_HEAD")
+        Dim behind As Integer = 0
+        Integer.TryParse(behindResult.Output, behind)
+        If behind = 0 Then
+            Log("==> 远端没有新提交，可直接推送")
+            Return True
+        End If
+
+        ' 用 fetch 得到的 FETCH_HEAD 直接 rebase，避免再走一次网络。
+        ' 刻意不加 -X ours/theirs：实测 -X theirs 会把 README 同行冲突整块按本地覆盖，
+        ' 静默丢掉远端对同一文件的其它改动，因此宁可失败也不要丢数据。
+        Log($"==> 远端领先 {behind} 个提交，执行 git rebase 合并")
+        Dim pull = Await QueryGitAsync(gitExe, workDir, "rebase FETCH_HEAD")
+        If pull.ExitCode = 0 Then
+            Log("==> 已合并远端提交（rebase 完成，两边改动均保留）")
+            Return True
+        End If
+
+        ' 冲突：中止 rebase，恢复操作前状态，绝不留下半合并的工作树
+        Await QueryGitAsync(gitExe, workDir, "rebase --abort")
+        Log("==> [警告] 合并冲突，已回退到合并前状态（常见为 README.md 同一行被两边修改）")
+        If Not String.IsNullOrWhiteSpace(pull.ErrorText) Then Log("[stderr] " & pull.ErrorText)
+
+        Dim choice = MessageBox.Show(
+            $"远端 main 有 {behind} 个本地没有的提交，自动合并时发生冲突，已回退，未改动任何文件。" & vbCrLf & vbCrLf &
+            "点「是」：以本地为准强制推送（--force），会丢弃远端这 " & behind & " 个提交。" & vbCrLf &
+            "点「否」：中止本次推送，手动 git pull 解决冲突后再推。",
+            "远端分叉且合并冲突", MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+        If choice = DialogResult.Yes Then
+            forcePush = True   ' 本次推送改用 --force，用户已明确同意覆盖
+            Log("==> 用户选择以本地为准强制覆盖推送")
+            Return True
+        End If
+        Return False
+    End Function
 
     ' ==================== 辅助函数 ====================
     ''' <summary>判断 origin 是否存在</summary>
@@ -2464,9 +2837,10 @@ Public Class MainForm
                         End Sub)
     End Function
 
-    ''' <summary>执行一条 git 命令：输出写入日志，退出码与 stdout / stderr 通过 ByRef 返回</summary>
+    ''' <summary>执行一条 git 命令：退出码与 stdout / stderr 通过 ByRef 返回；默认把输出写入日志</summary>
     Private Sub ExecuteGit(gitExe As String, workDir As String, args As String,
-                           ByRef exitCode As Integer, ByRef stdOut As String, ByRef stdErr As String)
+                           ByRef exitCode As Integer, ByRef stdOut As String, ByRef stdErr As String,
+                           Optional logOutput As Boolean = True)
         Dim psi As New ProcessStartInfo() With {
             .FileName = gitExe,
             .Arguments = args,
@@ -2483,8 +2857,10 @@ Public Class MainForm
             stdErr = p.StandardError.ReadToEnd()
             p.WaitForExit()
             exitCode = p.ExitCode
-            If Not String.IsNullOrWhiteSpace(stdOut) Then Log(stdOut.TrimEnd())
-            If Not String.IsNullOrWhiteSpace(stdErr) Then Log("[stderr] " & stdErr.TrimEnd())
+            If logOutput Then
+                If Not String.IsNullOrWhiteSpace(stdOut) Then Log(stdOut.TrimEnd())
+                If Not String.IsNullOrWhiteSpace(stdErr) Then Log("[stderr] " & stdErr.TrimEnd())
+            End If
         End Using
     End Sub
 

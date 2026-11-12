@@ -1,3 +1,11 @@
 <Solution>
   <Project Path="GitPushTool.vbproj" />
+  <!-- 以下为并入的 FastGithub 源码（MIT），通过 ProjectReference 由主项目引用 -->
+  <Project Path="FastGithubSrc\FastGithub\FastGithub.csproj" />
+  <Project Path="FastGithubSrc\FastGithub.Configuration\FastGithub.Configuration.csproj" />
+  <Project Path="FastGithubSrc\FastGithub.DomainResolve\FastGithub.DomainResolve.csproj" />
+  <Project Path="FastGithubSrc\FastGithub.FlowAnalyze\FastGithub.FlowAnalyze.csproj" />
+  <Project Path="FastGithubSrc\FastGithub.Http\FastGithub.Http.csproj" />
+  <Project Path="FastGithubSrc\FastGithub.HttpServer\FastGithub.HttpServer.csproj" />
+  <Project Path="FastGithubSrc\FastGithub.PacketIntercept\FastGithub.PacketIntercept.csproj" />
 </Solution>

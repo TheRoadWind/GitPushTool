@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  
+	<ItemGroup>
+		<PackageReference Include="PInvoke.AdvApi32" Version="0.7.124" />
+		<PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+		<PackageReference Include="DNS" Version="7.0.0" />
+		<PackageReference Include="Tommy" Version="3.1.2" />
+		<ProjectReference Include="..\FastGithub.Configuration\FastGithub.Configuration.csproj" />
+	</ItemGroup>
+
+	<!-- 并入后：dnscrypt-proxy.exe / toml 由主项目嵌入单文件 exe，运行时释放，
+	     这里不再复制到输出目录，避免破坏"单文件发布" -->
+
+
+</Project>

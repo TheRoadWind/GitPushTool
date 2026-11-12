@@ -1,0 +1,38 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+	<PropertyGroup>
+		<AssemblyName>fastgithub</AssemblyName>
+		<!-- 并入 GitPushTool 后作为类库被 ProjectReference 引用：
+		     主项目是自包含单文件 exe，.NET 不允许它引用"非自包含的可执行项目"(NETSDK1150)。
+		     Program.Main 保留作为源码参考，独立运行请用原目录 FastGithub-master。 -->
+		<OutputType>Library</OutputType>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<!-- Web SDK 默认会把 appsettings*.json、wwwroot 作为 Content 复制到发布目录；
+		     并入后这些内容已由主项目嵌入单文件 exe，禁用默认内容项以保持单文件发布 -->
+		<EnableDefaultContentItems>false</EnableDefaultContentItems>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
+		<PackageReference Include="Serilog.Sinks.Network" Version="2.0.2.68" />
+		<ProjectReference Include="..\FastGithub.DomainResolve\FastGithub.DomainResolve.csproj" />
+		<ProjectReference Include="..\FastGithub.HttpServer\FastGithub.HttpServer.csproj" />
+		<ProjectReference Include="..\FastGithub.PacketIntercept\FastGithub.PacketIntercept.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Serilog.Extensions.Hosting" Version="5.0.1" />
+		<PackageReference Include="Serilog.Sinks.Console" Version="4.1.0" />
+		<PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
+		<PackageReference Include="Serilog.Settings.Configuration" Version="3.4.0" />
+	</ItemGroup>
+
+	<!-- 并入后：README / LICENSE / appsettings 改由主项目作为 EmbeddedResource 嵌入单文件 exe，
+	     启动时由 GitPushTool 释放到 LocalAppData，因此这里不再向输出目录复制文件，
+	     保证最终发布目录只有 GitPushTool.exe 一个文件 -->
+	<ItemGroup>
+		<Folder Include="Properties\" />
+	</ItemGroup>
+
+</Project>

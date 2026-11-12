@@ -2,20 +2,23 @@
 
   <PropertyGroup>
     <!-- 版本号：本工具自身的版本（exe 文件属性、图标等会用到） -->
-    <Version>2.4.7.0</Version>
+    <Version>2.7.1.0</Version>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- 与并入的 FastGithub 源码保持一致（其 Directory.Build.props 指定 win-x64） -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <StartupObject>GitPushTool.My.MyApplication</StartupObject>
     <UseWindowsForms>true</UseWindowsForms>
     <MyType>WindowsForms</MyType>
     <NuGetAudit>False</NuGetAudit>
     <!-- 应用程序图标：exe 文件图标 + 窗体默认图标来源 -->
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <!-- 进程内集成 FastGithub：WinDivert / 根证书 / hosts 等操作需要管理员权限 -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <!-- 单文件发布配置（Release 配置生效）：自包含 + 单 exe + 压缩 -->
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
@@ -30,10 +33,82 @@
     <Import Include="System.Windows.Forms" />
   </ItemGroup>
 
+  <!-- ========== 并入 FastGithub：项目引用（进程内调用） ========== -->
+  <ItemGroup>
+    <ProjectReference Include="FastGithubSrc\FastGithub\FastGithub.csproj" />
+  </ItemGroup>
+
+  <!-- 引用 ASP.NET Core Web 项目会传递 Microsoft.AspNetCore.App 框架引用 -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- 把图标作为嵌入资源，运行时可从程序集中读取作为窗体图标 -->
     <EmbeddedResource Include="Resources\app.ico">
       <LogicalName>GitPushTool.app.ico</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- FastGithub 运行时文件：嵌入单文件 exe，启动时释放到 %LOCALAPPDATA%\GitPushTool\fastgithub
+       逻辑名用 "/" 分隔，前段作为目录、最后一段作为文件名 -->
+  <ItemGroup>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings.json">
+      <LogicalName>FastGithubRuntime/appsettings.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.amazonaws.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.amazonaws.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.bootcss.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.bootcss.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.fastly.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.fastly.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.github.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.github.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.google.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.google.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.imgur.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.imgur.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.microsoft.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.microsoft.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.packages.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.packages.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub\appsettings\appsettings.v2ex.json">
+      <LogicalName>FastGithubRuntime/appsettings/appsettings.v2ex.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\@dnscrypt-proxy\dnscrypt-proxy.toml">
+      <LogicalName>FastGithubRuntime/dnscrypt-proxy/dnscrypt-proxy.toml</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\@dnscrypt-proxy\win-x64\dnscrypt-proxy.exe">
+      <LogicalName>FastGithubRuntime/dnscrypt-proxy/dnscrypt-proxy.exe</LogicalName>
+    </EmbeddedResource>
+    <!-- MIT 许可：随程序一起分发 -->
+    <EmbeddedResource Include="FastGithubSrc\LICENSE">
+      <LogicalName>FastGithubRuntime/LICENSE</LogicalName>
+    </EmbeddedResource>
+    <!-- 原项目 FastGithub.UI 的可视化窗口（net45 WPF）：作为独立进程显示，
+         UDP 日志端口与内置加速共用 38457，可实时看到流量曲线与日志 -->
+    <EmbeddedResource Include="FastGithubSrc\FastGithub.UI\Prebuilt\FastGithub.UI.exe">
+      <LogicalName>FastGithubRuntime/ui/FastGithub.UI.exe</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub.UI\Prebuilt\FastGithub.UI.exe.config">
+      <LogicalName>FastGithubRuntime/ui/FastGithub.UI.exe.config</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub.UI\Prebuilt\LiveCharts.dll">
+      <LogicalName>FastGithubRuntime/ui/LiveCharts.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub.UI\Prebuilt\LiveCharts.Wpf.dll">
+      <LogicalName>FastGithubRuntime/ui/LiveCharts.Wpf.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="FastGithubSrc\FastGithub.UI\Prebuilt\Newtonsoft.Json.dll">
+      <LogicalName>FastGithubRuntime/ui/Newtonsoft.Json.dll</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
@@ -51,5 +126,21 @@
       <LastGenOutput>Application.Designer.vb</LastGenOutput>
     </None>
   </ItemGroup>
+
+  <!-- 单文件发布兜底：清理 Web SDK / 引用项目带出的松散内容文件
+       （这些文件已嵌入 exe，运行时释放到 LocalAppData，发布目录只需保留 exe） -->
+  <Target Name="RemoveFastGithubLooseFiles" AfterTargets="Publish">
+    <ItemGroup>
+      <LooseFastGithubFiles Include="$(PublishDir)appsettings.json" />
+      <LooseFastGithubFiles Include="$(PublishDir)appsettings\**\*" />
+      <LooseFastGithubFiles Include="$(PublishDir)dnscrypt-proxy\**\*" />
+      <LooseFastGithubFiles Include="$(PublishDir)LICENSE" />
+      <LooseFastGithubFiles Include="$(PublishDir)README.md" />
+      <LooseFastGithubFiles Include="$(PublishDir)README.html" />
+    </ItemGroup>
+    <Delete Files="@(LooseFastGithubFiles)" />
+    <RemoveDir Directories="$(PublishDir)appsettings" Condition="Exists('$(PublishDir)appsettings')" />
+    <RemoveDir Directories="$(PublishDir)dnscrypt-proxy" Condition="Exists('$(PublishDir)dnscrypt-proxy')" />
+  </Target>
 
 </Project>
