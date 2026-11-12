@@ -43,6 +43,7 @@ Public Class MainForm
     Private chkForce As CheckBox         ' 强制覆盖推送
     Private chkAccelerate As CheckBox    ' 推送前启用 FastGithub 加速（外部进程，默认关闭）
     Private lblAccelerate As Label       ' 加速状态提示
+    Private lblPushProgress As Label     ' git push 实时进度（大项目推送时可见）
     Private btnSettings As Button        ' 设置按钮
     Private btnPush As Button            ' 创建并推送按钮
     Private lblHint As Label             ' 提示文字
@@ -92,6 +93,8 @@ Public Class MainForm
     Private formShown As Boolean = False
     ' 本次推送是否强制覆盖（用户在"远端分叉且冲突"弹窗里点「是」时置位）
     Private forcePush As Boolean = False
+    ' 进度日志节流：记录上一次写日志的百分比十位，避免 git 每个 \r 刷新都刷屏
+    Private lastProgressDecade As Integer = -1
 
     ' 配置文件目录与路径：C:\Users\Administrator\AppData\Roaming\GitPushTool
     Private ReadOnly configDir As String =
@@ -240,6 +243,16 @@ Public Class MainForm
             .ForeColor = Color.Gray
         }
         pnlPush.Controls.Add(lblHint)
+
+        ' 推送进度：实时显示 git --progress 的 "Writing objects: 45% ..." 这类行
+        lblPushProgress = New Label() With {
+            .Text = "",
+            .Location = New Point(10, 418),
+            .Size = New Size(470, 18),
+            .ForeColor = Color.DarkGreen,
+            .AutoEllipsis = True
+        }
+        pnlPush.Controls.Add(lblPushProgress)
 
         ' ========== 中间：README 面板 ==========
         pnlReadme = New Panel() With {
@@ -2532,12 +2545,16 @@ Public Class MainForm
             End If
 
             ' ---- 推代码 ----
+            ' --progress 强制 git 输出进度（非终端时默认不输出）；showProgress 让日志/标签实时刷新，
+            ' 大项目推送时不会长时间一片空白
+            lastProgressDecade = -1
+            UpdatePushProgress("准备推送...")
             If chkForce.Checked OrElse forcePush Then
-                Log("==> git push -u origin main --force（强制覆盖）")
-                Await RunGitAsync(gitExe, projectPath, "push -u origin main --force")
+                Log("==> git push -u origin main --force --progress（强制覆盖）")
+                Await RunGitAsync(gitExe, projectPath, "push -u origin main --force --progress", showProgress:=True)
             Else
-                Log("==> git push -u origin main")
-                Await RunGitAsync(gitExe, projectPath, "push -u origin main")
+                Log("==> git push -u origin main --progress")
+                Await RunGitAsync(gitExe, projectPath, "push -u origin main --progress", showProgress:=True)
             End If
 
             ' ---- 推 tag ----
@@ -2552,6 +2569,7 @@ Public Class MainForm
                 Await RunGitAsync(gitExe, projectPath, $"remote set-url origin ""{repoUrl}""")
             End If
 
+            UpdatePushProgress("推送完成")
             Log(vbCrLf & "===== 推送完成 =====")
             Await LoadRepoListAsync()
             MessageBox.Show("推送成功！", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information)
@@ -2800,13 +2818,21 @@ Public Class MainForm
     ''' 命中 Git 2.35.2+ 的 safe.directory 安全检查（dubious ownership，即仓库目录所有者
     ''' 与当前用户 SID 不一致）时，自动把该目录加入全局信任后重试一次
     ''' </summary>
-    Private Function RunGitAsync(gitExe As String, workDir As String, args As String, Optional ignoreError As Boolean = False) As Task
+    Private Function RunGitAsync(gitExe As String, workDir As String, args As String,
+                                 Optional ignoreError As Boolean = False,
+                                 Optional showProgress As Boolean = False) As Task
         Return Task.Run(Sub()
                             Dim exitCode As Integer = 0
                             Dim outText As String = ""
                             Dim errText As String = ""
 
-                            ExecuteGit(gitExe, workDir, args, exitCode, outText, errText)
+                            ' 推送等耗时命令走实时读取，让日志/进度标签跟着 git --progress 的输出走；
+                            ' 其余命令沿用一次性读取即可
+                            If showProgress Then
+                                ExecuteGitLive(gitExe, workDir, args, exitCode, outText, errText)
+                            Else
+                                ExecuteGit(gitExe, workDir, args, exitCode, outText, errText)
+                            End If
 
                             ' safe.directory 修复：stderr 里出现 dubious ownership 说明仓库目录
                             ' 所有者（如 BUILTIN\Administrators）与当前用户不一致，git 拒绝操作
@@ -2862,6 +2888,97 @@ Public Class MainForm
                 If Not String.IsNullOrWhiteSpace(stdErr) Then Log("[stderr] " & stdErr.TrimEnd())
             End If
         End Using
+    End Sub
+
+    ''' <summary>
+    ''' 实时执行 git 命令：git --progress 用 \r 刷新同一行进度，普通 ReadLine 会一直缓冲到
+    ''' 进程结束，所以这里逐字符读取并把 \r 也当换行，边读边刷新日志与进度标签。
+    ''' stdout / stderr 仍完整返回，供上层做 safe.directory 之类的判断。
+    ''' </summary>
+    Private Sub ExecuteGitLive(gitExe As String, workDir As String, args As String,
+                                ByRef exitCode As Integer, ByRef stdOut As String, ByRef stdErr As String)
+        Dim psi As New ProcessStartInfo() With {
+            .FileName = gitExe,
+            .Arguments = args,
+            .WorkingDirectory = workDir,
+            .RedirectStandardOutput = True,
+            .RedirectStandardError = True,
+            .UseShellExecute = False,
+            .CreateNoWindow = True,
+            .StandardOutputEncoding = Encoding.UTF8,
+            .StandardErrorEncoding = Encoding.UTF8
+        }
+        Using p As Process = Process.Start(psi)
+            Dim outSb As New StringBuilder(), errSb As New StringBuilder()
+            ' 两个流必须并发读取，否则任一缓冲区写满都会造成互相等待的死锁
+            Dim tOut = Task.Run(Sub() ReadStreamLive(p.StandardOutput, outSb, False))
+            Dim tErr = Task.Run(Sub() ReadStreamLive(p.StandardError, errSb, True))
+            Task.WaitAll(tOut, tErr)
+            p.WaitForExit()
+            exitCode = p.ExitCode
+            stdOut = outSb.ToString()
+            stdErr = errSb.ToString()
+        End Using
+    End Sub
+
+    ''' <summary>逐字符读取一个流，\r 与 \n 都视为行结束，完整原文写入 buffer</summary>
+    Private Sub ReadStreamLive(reader As StreamReader, buffer As StringBuilder, isError As Boolean)
+        Dim chars(1023) As Char
+        Dim line As New StringBuilder()
+        While True
+            Dim n = reader.Read(chars, 0, chars.Length)
+            If n = 0 Then Exit While
+            For i = 0 To n - 1
+                Dim c = chars(i)
+                buffer.Append(c)
+                If c = ControlChars.Cr OrElse c = ControlChars.Lf Then
+                    If line.Length > 0 Then
+                        FlushGitLine(line.ToString(), isError)
+                        line.Clear()
+                    End If
+                Else
+                    line.Append(c)
+                End If
+            Next
+        End While
+        ' 收尾：进程结束时最后一行可能没有换行符
+        If line.Length > 0 Then FlushGitLine(line.ToString(), isError)
+    End Sub
+
+    ''' <summary>处理一行 git 输出：进度行交给节流器，其余照常写日志</summary>
+    Private Sub FlushGitLine(raw As String, isError As Boolean)
+        Dim text = raw.Trim()
+        If text = "" Then Return
+        If text.Contains("%") AndAlso isError Then
+            ReportPushProgress(text)
+        Else
+            Log(If(isError, "[stderr] ", "") & text)
+        End If
+    End Sub
+
+    ''' <summary>进度行实时更新标签；日志里每跨过 10% 才记一条，避免大项目刷屏</summary>
+    Private Sub ReportPushProgress(text As String)
+        Dim m = Regex.Match(text, "(\d+)%")
+        Dim pct As Integer = 0
+        If Not m.Success OrElse Not Integer.TryParse(m.Groups(1).Value, pct) Then
+            Log(text)
+            Return
+        End If
+        UpdatePushProgress(text)
+        Dim decade = pct \ 10
+        If decade <> lastProgressDecade Then
+            lastProgressDecade = decade
+            Log("    " & text)
+        End If
+    End Sub
+
+    ''' <summary>线程安全地更新推送进度标签</summary>
+    Private Sub UpdatePushProgress(text As String)
+        If lblPushProgress.InvokeRequired Then
+            lblPushProgress.Invoke(Sub() UpdatePushProgress(text))
+            Return
+        End If
+        lblPushProgress.Text = text
     End Sub
 
     ' ==================== 日志 ====================

@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- 版本号：本工具自身的版本（exe 文件属性、图标等会用到） -->
-    <Version>2.7.1.0</Version>
+    <Version>2.7.2.0</Version>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <!-- 与并入的 FastGithub 源码保持一致（其 Directory.Build.props 指定 win-x64） -->
