@@ -954,17 +954,19 @@ Public Class MainForm
 
     ' ==================== README 占位符与目录结构 ====================
     ''' <summary>
-    ''' 只替换 README 里的 {项目名} / {用户名} 占位符，不新增或改写任何段落。
+    ''' 只替换 README 里的 {项目名} 占位符，不新增或改写任何段落。
+    ''' 出于隐私保护不再把 GitHub 用户名写进 README：模板里已不再使用 {用户名}，
+    ''' 老 README 里若残留该占位符则保持原样，不替换成真实账号。
     ''' 已有 README 的项目只做这一步，其余内容完全交给用户在本面板里维护。
     ''' </summary>
     Private Sub ReplaceReadmePlaceholders(projName As String)
         If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
-        txtReadme.Text = txtReadme.Text.Replace("{项目名}", projName).Replace("{用户名}", currentUser)
+        txtReadme.Text = txtReadme.Text.Replace("{项目名}", projName)
     End Sub
 
     ''' <summary>
     ''' 统一整理 README 面板内容（仅用于工具新生成的 README）：
-    ''' 1) 立即把 {项目名}/{用户名} 占位符替换为真实值（不再等到推送时才替换）
+    ''' 1) 立即把 {项目名} 占位符替换为真实值（不再写入 GitHub 用户名）
     ''' 2) 把"目录结构"小节刷新为当前项目的真实目录树
     ''' 3) 把"环境要求"小节的运行时同步为项目实际技术栈
     ''' 4) 自动导入项目图标并在 README 顶部显示（ico 会转成 PNG，GitHub 才能渲染）
@@ -972,7 +974,7 @@ Public Class MainForm
     Private Sub NormalizeReadme(projectDir As String, projName As String)
         If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
 
-        ' 1) 占位符替换（{项目名} / {用户名}）
+        ' 1) 占位符替换（只替换 {项目名}，不写入 GitHub 用户名）
         ReplaceReadmePlaceholders(projName)
 
         ' 2) 目录结构刷新（以当前项目实际目录为准）
@@ -3071,8 +3073,11 @@ Public Class MainForm
         sb.AppendLine()
         sb.AppendLine("## 🚀 快速开始")
         sb.AppendLine()
+        ' 不把 GitHub 用户名 / 完整 clone 地址写进 README：
+        ' 用相对链接指向当前仓库，只有在 GitHub 网页上打开后，地址栏才会显示完整地址
+        sb.AppendLine("[打开 GitHub 仓库](./) — 打开网页后地址栏会显示完整仓库地址，可直接复制用于 Clone")
+        sb.AppendLine()
         sb.AppendLine("```bash")
-        sb.AppendLine("git clone https://github.com/{用户名}/{项目名}.git")
         sb.AppendLine("cd {项目名}")
         sb.AppendLine("```")
         sb.AppendLine()
