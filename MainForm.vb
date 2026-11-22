@@ -95,6 +95,9 @@ Public Class MainForm
     Private forcePush As Boolean = False
     ' 进度日志节流：记录上一次写日志的百分比十位，避免 git 每个 \r 刷新都刷屏
     Private lastProgressDecade As Integer = -1
+    ' 当前 README 是否为工具为新项目生成的（磁盘上原本没有 README.md）
+    ' 已有 README 视为用户在本面板里维护的内容，不再自动插入目录结构 / 更新日志 / 图标
+    Private readmeIsGenerated As Boolean = False
 
     ' 配置文件目录与路径：C:\Users\Administrator\AppData\Roaming\GitPushTool
     Private ReadOnly configDir As String =
@@ -549,17 +552,17 @@ Public Class MainForm
             ' 自动读取 README.md 内容
             Dim readmePath = Path.Combine(dir, "README.md")
             If File.Exists(readmePath) Then
+                ' 已有 README：内容由用户在本面板里维护，保持原样，只替换占位符
                 txtReadme.Text = File.ReadAllText(readmePath, Encoding.UTF8)
+                readmeIsGenerated = False
+                ReplaceReadmePlaceholders(name)
             Else
+                ' 新项目：工具生成默认 README，并做全套自动整理
                 txtReadme.Text = DefaultReadme(name)
+                readmeIsGenerated = True
+                NormalizeReadme(dir, name)
+                If v <> "" Then AutoSyncReadmeVersion(v)
             End If
-
-            ' 统一整理 README：立即替换 {项目名}/{用户名} 占位符 + 刷新目录结构
-            ' （此前占位符只在推送时替换，面板里会一直显示模板占位符）
-            NormalizeReadme(dir, name)
-
-            ' 自动把探测到的版本号同步进 README 的更新日志（无需再手动点“确认升级”）
-            If v <> "" Then AutoSyncReadmeVersion(v)
         Catch
         End Try
     End Sub
@@ -951,7 +954,16 @@ Public Class MainForm
 
     ' ==================== README 占位符与目录结构 ====================
     ''' <summary>
-    ''' 统一整理 README 面板内容：
+    ''' 只替换 README 里的 {项目名} / {用户名} 占位符，不新增或改写任何段落。
+    ''' 已有 README 的项目只做这一步，其余内容完全交给用户在本面板里维护。
+    ''' </summary>
+    Private Sub ReplaceReadmePlaceholders(projName As String)
+        If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
+        txtReadme.Text = txtReadme.Text.Replace("{项目名}", projName).Replace("{用户名}", currentUser)
+    End Sub
+
+    ''' <summary>
+    ''' 统一整理 README 面板内容（仅用于工具新生成的 README）：
     ''' 1) 立即把 {项目名}/{用户名} 占位符替换为真实值（不再等到推送时才替换）
     ''' 2) 把"目录结构"小节刷新为当前项目的真实目录树
     ''' 3) 把"环境要求"小节的运行时同步为项目实际技术栈
@@ -961,7 +973,7 @@ Public Class MainForm
         If String.IsNullOrWhiteSpace(txtReadme.Text) Then Return
 
         ' 1) 占位符替换（{项目名} / {用户名}）
-        txtReadme.Text = txtReadme.Text.Replace("{项目名}", projName).Replace("{用户名}", currentUser)
+        ReplaceReadmePlaceholders(projName)
 
         ' 2) 目录结构刷新（以当前项目实际目录为准）
         UpdateReadmeDirectoryTree(projectDir)
@@ -2442,18 +2454,26 @@ Public Class MainForm
                 End If
             End If
 
-            ' README.md：写入磁盘前统一整理（占位符替换 + 目录结构刷新 + 版本号同步）
+            ' README.md
             If chkReadme.Checked Then
                 Dim readmePath = Path.Combine(projectPath, "README.md")
                 Dim projName = New DirectoryInfo(projectPath).Name
-                If String.IsNullOrWhiteSpace(txtReadme.Text) Then txtReadme.Text = DefaultReadme(projName)
-                ' 替换 {项目名}/{用户名} 占位符，并把目录结构刷新为推送时的真实结构
-                NormalizeReadme(projectPath, projName)
-                ' 自动把探测到的版本号同步进 README（新版本号会插入一条更新记录）
-                If detectedVer <> "" Then AutoSyncReadmeVersion(detectedVer)
+
+                If readmeIsGenerated Then
+                    ' 新项目：工具生成的 README 才做占位符 / 目录结构 / 运行时 / 图标 / 版本号整理
+                    If String.IsNullOrWhiteSpace(txtReadme.Text) Then txtReadme.Text = DefaultReadme(projName)
+                    NormalizeReadme(projectPath, projName)
+                    If detectedVer <> "" Then AutoSyncReadmeVersion(detectedVer)
+                Else
+                    ' 已有 README：用户在本面板里维护，只替换占位符，不自动插入任何段落
+                    ReplaceReadmePlaceholders(projName)
+                    If String.IsNullOrWhiteSpace(txtReadme.Text) Then txtReadme.Text = DefaultReadme(projName)
+                End If
 
                 Log("==> 写入 README.md")
                 File.WriteAllText(readmePath, txtReadme.Text, New UTF8Encoding(False))
+                ' 写盘后 README 已存在，后续推送按“用户维护的 README”对待
+                readmeIsGenerated = False
             End If
 
             ' 自动创建远程仓库

@@ -16,7 +16,7 @@
 - 支持仓库管理
 - 版本号自动读取（支持 VB/C# 工程、bin\Release / bin\Debug 编译产物 exe/dll、apk/aab、Node、Maven、Gradle、Flutter、Rust、Python 等，只读不可修改）
 - 打 tag 时保留 Git 仓库原有 tag
-- 推送时自动更新 README 里的版本号、目录结构与运行时
+- 新项目自动生成 README（版本号 / 目录结构 / 运行时 / 图标）；已有 README 保持用户编辑的原样
 - 自动导入程序图标到 README（GitHub 上直接可见，ico 自动转 PNG）
 - 内置 FastGithub 加速（源码已并入 `FastGithubSrc/`，项目引用 + 进程内调用，**启动时自动启用**）
 - 启动时自动打开原项目的加速窗口（流量曲线 / UDP 日志 / 问答），可实时查看加速状态
@@ -154,6 +154,11 @@ GitPushTool/
 ```
 
 ## 📝 更新日志
+
+### v2.7.3.0 (2026-11-22)
+
+- 已有 README.md 的项目不再被工具自动插入内容：目录结构、更新日志版本号、运行时、图标段落全部保留用户在本面板里维护的原文，只替换 `GitPushTool` / `TheRoadWind` 占位符
+- 只有项目原本没有 README.md 时，才由工具生成默认 README 并做全套自动整理
 
 ### v2.7.2.0 (2026-11-12)
 
